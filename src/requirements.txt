@@ -1,0 +1,7 @@
+PyQt5
+pyqtgraph
+numpy
+opencv-python
+pandas
+PyMuPDF
+
