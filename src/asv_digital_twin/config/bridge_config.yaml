@@ -1,0 +1,30 @@
+# Bridge Configuration for ASV Digital Twin
+
+# 1. System Clock (Gazebo -> ROS)
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# 2. IMU Sensor (Gazebo -> ROS)
+- ros_topic_name: "/asv/sensors/imu"
+  gz_topic_name: "/asv/sensors/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+# 3. GPS/NavSat (Gazebo -> ROS)
+- ros_topic_name: "/asv/sensors/gps"
+  gz_topic_name: "/asv/sensors/gps"
+  ros_type_name: "sensor_msgs/msg/NavSatFix"
+  gz_type_name: "gz.msgs.NavSat"
+  direction: GZ_TO_ROS
+
+# 4. PHYSICS BYPASS POSE (ROS -> Gazebo)
+# This allows the Python node to drive the visual model
+- ros_topic_name: "/model/asv_vessel/pose"
+  gz_topic_name: "/model/asv_vessel/pose"
+  ros_type_name: "geometry_msgs/msg/Pose"
+  gz_type_name: "gz.msgs.Pose"
+  direction: ROS_TO_GZ
