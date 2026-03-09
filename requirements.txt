@@ -1,7 +1,7 @@
 PyQt5
 pyqtgraph
 numpy
-opencv-python
+opencv-python-headless
 pandas
 PyMuPDF
 
