@@ -1,3 +1,3 @@
 source venv/bin/activate
-pip uninstall opencv-python
+pip uninstall opencv-python -y
 pip install opencv-python-headless
