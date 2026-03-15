@@ -1,6 +1,6 @@
 PyQt5
 pyqtgraph
-numpy
+numpy<2
 pandas
 PyMuPDF
 
