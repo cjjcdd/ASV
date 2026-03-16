@@ -79,6 +79,8 @@ class GuiNode(Node):
         # [CHANGE] Single topic for validation input (u, v, delta, dt)
         self.pub_val = self.create_publisher(Twist, '/val_input', 10)
 
+        self.pub_init_state = self.create_publisher(Twist, '/init_state', 10)
+
         # --- Subscribers ---
         self.sub = self.create_subscription(Odometry, ODOM_TOPIC, self.cb, qos_profile_sensor_data)
         self.sub_js = self.create_subscription(JointState, JOINT_TOPIC, self.cb_js, qos_profile_sensor_data)
@@ -100,11 +102,14 @@ class GuiNode(Node):
         p = msg.pose.pose.position
         self.state['x'] = p.x; self.state['y'] = p.y
         self.state['u'] = msg.twist.twist.linear.x
+        
+        # ADD THIS LINE: Retrieve sway, inverting ENU Y back to NED sway
+        self.state['v'] = -msg.twist.twist.linear.y 
+        
         self.state['r'] = math.degrees(msg.twist.twist.angular.z)
         r, p, y = euler(msg.pose.pose.orientation)
         self.state['phi'] = r; self.state['theta'] = p; self.state['psi'] = y
 
-        # [ADD] Signal that new physics state is ready
         self.new_odom_received = True
 
     def cb_js(self, msg):
@@ -140,6 +145,17 @@ class GuiNode(Node):
         t.linear.z = float(dt)     # Send dt in linear.z
         t.angular.z = float(delta) # Send delta in angular.z
         self.pub_val.publish(t)
+    
+    def send_init_state(self, u, v, r_rads, psi_rad, phi_rad, delta_rad):
+        """Send initial state to dynamics node before validation replay."""
+        t = Twist()
+        t.linear.x  = float(u)
+        t.linear.y  = float(v)
+        t.linear.z  = float(r_rads)     # rad/s
+        t.angular.x = float(psi_rad)    # rad
+        t.angular.y = float(phi_rad)    # rad
+        t.angular.z = float(delta_rad)  # rad
+        self.pub_init_state.publish(t)
 
 class App(QWidget):
     def __init__(self, node):
@@ -983,64 +999,145 @@ class App(QWidget):
         self.val_results = []
         self.pb_val.setMaximum(len(self.val_data))
         self.pb_val.setValue(0)
+
+        # Step 1: Reset sim to zeros
         self.node.pub_rst.publish(Bool(data=True))
+        # Drain the reset message from both sides
+        for _ in range(10):
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+
+        # Step 2: Inject initial conditions from CSV row 0
+        r0 = self.val_data.iloc[0]
+        init_u         = float(r0['u'])
+        init_v         = float(r0['v'])
+        init_r_rads    = math.radians(float(r0['r']))   if 'r'     in r0 else 0.0
+        init_psi_rad   = math.radians(float(r0['psi'])) if 'psi'   in r0 else 0.0
+        init_phi_rad   = math.radians(float(r0['phi'])) if 'phi'   in r0 else 0.0
+        init_delta_rad = math.radians(float(r0['delta']))if 'delta' in r0 else 0.0
+
+        # Step 3: Send init state and WAIT for the dynamics node to confirm
+        # by receiving the odom that cb_init_state now publishes
+        self.node.new_odom_received = False
+        self.node.send_init_state(init_u, init_v, init_r_rads, init_psi_rad, init_phi_rad, init_delta_rad)
+        timeout = time.time() + 2.0
+        while not self.node.new_odom_received and time.time() < timeout:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+
+        if not self.node.new_odom_received:
+            QMessageBox.warning(self, "Init Failed", "Dynamics node did not confirm init state. Is it running?")
+            return
+
+        # Step 4: Initialize yaw unwrapper correctly
+        # CSV psi is NED degrees. ENU yaw = 90 - psi_ned.
+        # marine_head from odom = (90 - enu_yaw_deg) % 360 = psi_ned (for small angles, but use modular)
+        init_psi_ned_deg = float(r0['psi']) if 'psi' in r0 else 0.0
+        init_enu_yaw_deg = math.degrees(math.pi / 2.0 - init_psi_rad)
+        init_marine_head = (90.0 - init_enu_yaw_deg) % 360.0  # = psi_ned mod 360
+
+        # Initialize ALL unwrapper state so loop() doesn't corrupt it
+        self.total_yaw           = init_psi_ned_deg   # start at actual NED heading in degrees
+        self.last_yaw_reading    = init_marine_head    # ENU marine heading at init
+        self.val_yaw             = init_marine_head
+        self.last_yaw_reading_val = init_marine_head
+        self.total_yaw_val       = init_psi_ned_deg
+        self.first_loop          = False               # prevent loop() from re-initializing
+
+        # Step 5: Initialize local unwrapper for step_validation recording
+        self._val_psi_unwrapped  = init_psi_ned_deg
+        self._val_psi_last       = init_marine_head
+
+        # STEP 6: Manually log Row 0 immediately as our initial condition
+        s = self.node.state
+        rec_row_0 = {
+            't':         r0['t'],
+            'ref_u':     float(r0['u']),
+            'v':         float(r0['v']),
+            'ref_delta': float(r0.get('delta', 0.0)),
+            'u':         s['u'],
+            'sim_v':     s['v'],
+            'r':         -s['r'],           
+            'x':         s['y'],
+            'y':         s['x'],
+            'psi':       self.total_yaw,
+            'phi':       s['phi'],
+            'theta':     s['theta'],
+            'delta':     self.node.rudder_actual
+        }
+        self.val_results.append(rec_row_0)
+
+        # STEP 7: Start the loop at Index 1
+        self.val_idx = 1
+        self.pb_val.setValue(1)
+
         self.sim_state = "VALIDATING"
         self.node.send_enable(True)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        QTimer.singleShot(0, self.step_validation)  # kick off chain
+        
+        QTimer.singleShot(0, self.step_validation)
 
     def step_validation(self):
         if self.val_idx >= len(self.val_data):
             self.end_validation()
             return
 
-        # Get Command from CSV
         row = self.val_data.iloc[self.val_idx]
-        
-        # Unit Conv: Deg -> Rad for Physics
-        u_cmd = float(row['u'])
-        v_cmd = float(row['v'])
+
+        u_cmd     = float(row['u'])
+        v_cmd     = float(row['v'])
         delta_deg = float(row['delta'])
         delta_rad = math.radians(delta_deg)
-        
-        # Send to Node
-        # IMPORTANT: We do NOT record here. We wait for the Node to reply.
+
+        # Send physics step to dynamics node
         self.node.send_val_cmd(u_cmd, v_cmd, delta_rad, self.val_dt)
-        
-        # Spin until odom reply arrives (blocking but fast)
+
+        # Wait synchronously for odom reply
         self.node.new_odom_received = False
-        timeout = time.time() + 1.0  # 1s timeout per step
+        timeout = time.time() + 1.0
         while not self.node.new_odom_received and time.time() < timeout:
             rclpy.spin_once(self.node, timeout_sec=0.005)
 
-        # Record result immediately
+        # Get state
         s = self.node.state
-        psi_enu = s['psi']
-        marine_head = (90.0 - psi_enu) % 360.0
+        # ENU yaw in degrees (from euler on quaternion)
+        psi_enu_deg  = s['psi']
+        marine_head  = (90.0 - psi_enu_deg) % 360.0  # NED marine heading [0,360)
+
+        # --- Local psi unwrapper (independent of loop() timer) ---
+        diff = marine_head - self._val_psi_last
+        if diff >  180.0: diff -= 360.0
+        if diff < -180.0: diff += 360.0
+        self._val_psi_unwrapped += diff
+        self._val_psi_last = marine_head
+
+        # Also keep loop()'s unwrapper in sync so the live plot is correct
+        self.total_yaw        = self._val_psi_unwrapped
+        self.last_yaw_reading = marine_head
+        self.val_yaw          = marine_head
 
         rec_row = {
-            't':         row['t'],
-            'ref_u':         float(row['u']),
-            'v':         float(row['v']),
-            'ref_delta':     float(row['delta']),
-            'u':     s['u'],
-            'sim_v':     s['v'],
-            'r':     -s['r'],           # FIX: negated
-            'x':     s['y'],
-            'y':     s['x'],
-            'psi':   self.total_yaw,
-            'phi':   s['phi'],
-            'theta': s['theta'],
-            'delta': self.node.rudder_actual
-        }
+                't':         row['t'],
+                'ref_u':         float(row['u']),
+                'v':         float(row['v']),
+                'ref_delta':     float(row['delta']),
+                'u':     s['u'],
+                'sim_v':     s['v'],
+                'r':     -s['r'],           # FIX: negated
+                'x':     s['y'],
+                'y':     s['x'],
+                'psi':   self.total_yaw,
+                'phi':   s['phi'],
+                'theta': s['theta'],
+                'delta': self.node.rudder_actual
+            }
+
         self.val_results.append(rec_row)
-        self.val_yaw = marine_head
         self.val_idx += 1
         self.pb_val.setValue(self.val_idx)
 
-        # Schedule next step via Qt event loop (keeps UI responsive)
         QTimer.singleShot(0, self.step_validation)
+
+    
     
 
     def end_validation(self):
