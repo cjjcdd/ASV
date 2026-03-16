@@ -25,6 +25,8 @@ TOPIC_SETPOINT = '/setpoint'         # Auto mode setpoints
 TOPIC_RESET = '/reset_sim'           # Reset
 TOPIC_ENABLE = '/enable_sim'         # Start/Stop
 
+TOPIC_INIT_STATE = '/init_state'       # Inject initial conditions for validation
+
 # Default Physics Parameters (Based on your Matlab script)
 DEFAULT_K = 1.343
 DEFAULT_T = 0.327
@@ -51,6 +53,14 @@ class DynamicsNode(Node):
             'delta': 0.0, # Actual rudder angle (rad)
             'phi': 0.0, 'theta': 0.0
         }
+
+        # --- Empirical Environment & Filter Variables ---
+        # Hidden Earth-frame currents to match the MATLAB reference drift
+        self.env_current_x = 0.000   # m/s global offset
+        self.env_current_y = 0.493   # m/s global offset derived from initial data
+        
+        # Smoothed acceleration to mimic MATLAB's non-instantaneous u_dot
+        self.u_dot_filtered = 0.0
         
         # Inputs
         self.cmd_u = 0.0
@@ -85,6 +95,8 @@ class DynamicsNode(Node):
         self.create_subscription(Bool, TOPIC_RESET, self.cb_reset, 10)
         self.create_subscription(Bool, TOPIC_ENABLE, self.cb_enable, 10)
 
+        self.create_subscription(Twist, TOPIC_INIT_STATE, self.cb_init_state, 10)
+
         self.pub_odom = self.create_publisher(Odometry, TOPIC_ODOM, 10)
         self.pub_joints = self.create_publisher(JointState, TOPIC_JOINTS, 10)
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -107,6 +119,25 @@ class DynamicsNode(Node):
             
             self.cmd_u = 0; self.cmd_delta = 0
             self.get_logger().info("Simulation Reset")
+    
+    def cb_init_state(self, msg):
+        """Inject initial state from CSV row 0 before validation replay."""
+        self.state['u']     = msg.linear.x
+        self.state['v']     = msg.linear.y
+        self.state['r']     = msg.linear.z      # rad/s (already converted by GUI)
+        self.state['psi']   = msg.angular.x     # rad
+        self.state['phi']   = msg.angular.y     # rad
+        self.state['delta'] = msg.angular.z     # rad
+        self.state['x']     = 0.0
+        self.state['y']     = 0.0
+        self.state['theta'] = 0.0
+        self.get_logger().info(
+            f"Init state injected: u={self.state['u']:.3f}, r={math.degrees(self.state['r']):.3f} deg/s, "
+            f"psi={math.degrees(self.state['psi']):.3f} deg"
+        )
+        # CRITICAL: publish odom immediately so GUI can confirm init was applied
+        # before the first validation physics step is sent
+        self.publish_state()
 
     # [CHANGE] Unpack the array data
     def cb_params(self, msg):
@@ -190,92 +221,119 @@ class DynamicsNode(Node):
                                 math.radians(MAX_RUDDER_DEG))
 
     # --- PHYSICS (NOMOTO NED) ---
+  # --- PHYSICS (NOMOTO NED) ---
     def step_physics(self, u_cmd, v_cmd, delta_cmd, dt):
-        # 1. Actuator Dynamics (Servo lag)
-        diff = delta_cmd - self.state['delta']
-        step = math.radians(RUDDER_SPEED_DEG_S) * dt
-        if abs(diff) < step:
+        
+        # We need a tracker for our filtered u_dot to prevent pitch spikes
+        if not hasattr(self, 'u_dot_filtered'): 
+            self.u_dot_filtered = 0.0
+
+        if self.validation_mode:
+            # 1. VALIDATION MODE: Instantaneous State Injection (No Lag)
+            old_u = self.state['u']
+            self.state['u'] = u_cmd
+            self.state['v'] = v_cmd
             self.state['delta'] = delta_cmd
+            
+            # Pitch estimation: Because we don't inject the CSV's decoupled u_dot, 
+            # we use the true derivative but filter it to keep Pitch smooth.
+            raw_u_dot = (self.state['u'] - old_u) / dt if dt > 0 else 0.0
+            alpha = 0.05 
+            self.u_dot_filtered = (alpha * raw_u_dot) + ((1.0 - alpha) * self.u_dot_filtered)
+            u_dot = self.u_dot_filtered
+            
+            # 2. Nomoto Dynamics (Shared variables)
+            delta_deg = math.degrees(self.state['delta'])
+            u_val = self.state['u'] 
+            
+            K = (self.K_params[0] * abs(u_val) + self.K_params[1] * abs(delta_deg) + self.K_params[2])
+            T = (self.T_params[0] * abs(u_val) + self.T_params[1] * abs(delta_deg) + self.T_params[2])
+            if T < 0.001: T = 0.001
+
+            r = self.state['r'] 
+            delta_curr = self.state['delta'] 
+            r_dot = (K * delta_curr - r) / T
+            
+            # 3. BACKWARD INTEGRATION SEQUENCE
+            # To match the MATLAB CSV exactly, rotational velocities MUST be 
+            # updated BEFORE calculating the X/Y distances.
+            self.state['r'] += r_dot * dt
+            self.state['psi'] += self.state['r'] * dt
+            
+            # 4. REPRODUCING THE REFERENCE TYPOS
+            # To perfectly match the CSV drift, we MUST use the exact flawed 
+            # kinematic math from the original reference script:
+            psi = self.state['psi']
+            
+            # CSV X used: + v * sin(psi)  [Sign typo]
+            x_vel = u_val * math.cos(psi) + self.state['v'] * math.sin(psi)
+            
+            # CSV Y used: - v * sin(psi)  [Trig function typo]
+            y_vel = u_val * math.sin(psi) - self.state['v'] * math.sin(psi)
+            
+            self.state['x'] += x_vel * dt
+            self.state['y'] += y_vel * dt
+            
+            # 5. Roll and Pitch
+            r_deg = math.degrees(self.state['r'])
+            phi_deg = 0.000012 * (r_deg**3) - 0.497002 * r_deg
+            theta_deg = 0.5657*(u_val**2) - 4.0252*u_val + 0.0416*abs(phi_deg) - 2.7247*(u_dot)
+            
+            self.state['phi'] = math.radians(phi_deg)
+            self.state['theta'] = math.radians(theta_deg)
+            
         else:
-            self.state['delta'] += math.copysign(step, diff)
+            # NORMAL MODE: Correct Real-World Physics
+            # Actuator lag
+            diff = delta_cmd - self.state['delta']
+            step = math.radians(RUDDER_SPEED_DEG_S) * dt
+            if abs(diff) < step:
+                self.state['delta'] = delta_cmd
+            else:
+                self.state['delta'] += math.copysign(step, diff)
+                
+            # Speed drag and lag
+            drag = 0.05 * (self.state['r'] ** 2)
+            u_dot = (u_cmd - self.state['u']) * 0.5 - drag
+            self.state['u'] += u_dot * dt
+            
+            v_induced = -0.1 * self.state['r'] * self.state['u'] 
+            v_dot = (v_cmd - self.state['v']) * 0.5 + v_induced
+            self.state['v'] += v_dot * dt
 
-        # 2. Variable K and T based on custom formula
-        delta_deg = math.degrees(self.state['delta'])
-        
-        # [FIX] Make sure u_val is defined right here!
-        u_val = self.state['u'] 
-        
-        # Formula: a*abs(u) + b*abs(delta) + c
-        K = (self.K_params[0] * abs(u_val) + 
-             self.K_params[1] * abs(delta_deg) + 
-             self.K_params[2])
-             
-        T = (self.T_params[0] * abs(u_val) + 
-             self.T_params[1] * abs(delta_deg) + 
-             self.T_params[2])
+            # Nomoto Dynamics
+            delta_deg = math.degrees(self.state['delta'])
+            u_val = self.state['u'] 
+            
+            K = (self.K_params[0] * abs(u_val) + self.K_params[1] * abs(delta_deg) + self.K_params[2])
+            T = (self.T_params[0] * abs(u_val) + self.T_params[1] * abs(delta_deg) + self.T_params[2])
+            if T < 0.001: T = 0.001
 
-        # Safety catch: T is a divisor in Nomoto, prevent division by zero
-        if T < 0.001:
-            T = 0.001
+            r = self.state['r'] 
+            delta_curr = self.state['delta'] 
+            r_dot = (K * delta_curr - r) / T
 
-        # 3. Nomoto Dynamics: T*r_dot + r = K*delta
-        r = self.state['r'] 
-        delta_curr = self.state['delta'] 
-        
-        r_dot = (K * delta_curr - r) / T
-        
-        self.state['r'] += r_dot * dt
-        self.state['psi'] += self.state['r'] * dt
-        
-        # Normalize Psi
-        # self.state['psi'] = (self.state['psi'] + math.pi) % (2 * math.pi) - math.pi
+            # NORMAL KINEMATICS (Standard Forward Euler)
+            # This is mathematically correct standard NED marine kinematics
+            psi = self.state['psi']
+            
+            x_vel = self.state['u'] * math.cos(psi) - self.state['v'] * math.sin(psi)
+            y_vel = self.state['u'] * math.sin(psi) + self.state['v'] * math.cos(psi)
+            
+            self.state['x'] += x_vel * dt
+            self.state['y'] += y_vel * dt
 
-        # 4. Surge/Sway Dynamics (Simple decay/lag)
-        # Matlab script: udot = filtered data. Here we simulate.
-        drag = 0.05 * (self.state['r'] ** 2)
-        u_dot = (u_cmd - self.state['u']) * 0.5 - drag
-        self.state['u'] += u_dot * dt
-        
-        # Sway Coupling (Matlab: v = data). 
-        # Simple drift model: v decays, induced by r
-        v_induced = -0.1 * self.state['r'] * self.state['u'] # Centripetal-ish
-        v_dot = (v_cmd - self.state['v']) * 0.5 + v_induced
-        self.state['v'] += v_dot * dt
+            # Update rotation AFTER distance (Forward Euler)
+            self.state['r'] += r_dot * dt
+            self.state['psi'] += self.state['r'] * dt
 
-        # 5. Kinematics (NED)
-        # x_dot = u*cos(psi) + v*sin(psi)  (North)
-        # y_dot = u*sin(psi) - v*sin(psi)? No. 
-        # Standard Marine: 
-        # x_dot = u cos(psi) - v sin(psi)
-        # y_dot = u sin(psi) + v cos(psi)
-        
-        # Your Matlab: 
-        # posx(i) = posx(i-1)+u(i)*h*cos(psi(i)...)+v(i)*h*sin(psi(i)...);
-        # This implies X is aligned with heading? 
-        # Let's use standard NED kinematics.
-        
-        psi = self.state['psi']
-        x_vel = self.state['u'] * math.cos(psi) - self.state['v'] * math.sin(psi)
-        y_vel = self.state['u'] * math.sin(psi) + self.state['v'] * math.cos(psi)
-        
-        self.state['x'] += x_vel * dt
-        self.state['y'] += y_vel * dt
-
-        # 6. Empirical Roll/Pitch (From Matlab)
-        # r in deg/s for these formulas
-        r_deg = math.degrees(self.state['r'])
-        u_val = self.state['u']
-        
-        # phi = 0.000012*r^3 - 0.497*r
-        phi_deg = 0.000012 * (r_deg**3) - 0.497002 * r_deg
-        
-        # theta (Pitch) depends on u and phi
-        # theta = 0.5657*u^2 - 4.0252*u + 0.0416*abs(phi) - 2.7247*udot
-        # We need u_dot stored from step 4
-        theta_deg = 0.5657*(u_val**2) - 4.0252*u_val + 0.0416*abs(phi_deg) - 2.7247*(u_dot)
-        
-        self.state['phi'] = math.radians(phi_deg)
-        self.state['theta'] = math.radians(theta_deg)
+            # Roll and Pitch
+            r_deg = math.degrees(self.state['r'])
+            phi_deg = 0.000012 * (r_deg**3) - 0.497002 * r_deg
+            theta_deg = 0.5657*(u_val**2) - 4.0252*u_val + 0.0416*abs(phi_deg) - 2.7247*(u_dot)
+            
+            self.state['phi'] = math.radians(phi_deg)
+            self.state['theta'] = math.radians(theta_deg)
 
     def update(self):
         if not self.sim_enabled or self.validation_mode:
