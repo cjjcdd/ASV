@@ -321,12 +321,12 @@ class App(QWidget):
 
         # Input Fields
         fn = QFormLayout()
-        self.le_K = QLineEdit("0.0, 0.118, 1.343") 
-        self.le_T = QLineEdit("0.0, 0.016, 0.327") 
+        self.le_K = QLineEdit("0.15, 0.20, 0.04, 2.3") 
+        self.le_T = QLineEdit("0.01, 0.01, 0.03, 0.3") 
         self.le_dt = QLineEdit("0.05")
         
-        fn.addRow("K parameter (a, b, c):", self.le_K)
-        fn.addRow("T parameter (a, b, c):", self.le_T)
+        fn.addRow("K parameter (a, b, c, d):", self.le_K)
+        fn.addRow("T parameter (a, b, c, d):", self.le_T)
         fn.addRow("Dt (Sim Step):", self.le_dt)
         lay_gb.addLayout(fn)
 
@@ -701,8 +701,8 @@ class App(QWidget):
             t_params = [float(x.strip()) for x in self.le_T.text().split(',')]
             dt = float(self.le_dt.text())
 
-            if len(k_params) != 3 or len(t_params) != 3:
-                self.lbl_rec.setText("Error: K and T must have exactly 3 values.")
+            if len(k_params) != 4 or len(t_params) != 4:
+                self.lbl_rec.setText("Error: K and T must have exactly 4 values.")
                 return
 
             self.node.send_nomoto_params(k_params, t_params, dt)
@@ -738,9 +738,9 @@ class App(QWidget):
         msg.setWindowTitle("Parameter Formatting Help")
         msg.setText(
             "<b>Format:</b><br>"
-            "a, b, c (comma separated)<br><br>"
+            "a, b, c, d (comma separated)<br><br>"
             "<b>Formula applied in physics engine:</b><br>"
-            "K/T = a * abs(surge_speed) + b * abs(delta) + c<br><br>"
+            "K (or T) = a + b * abs(delta) + c * abs(surge_speed) + d * abs(u_dot)<br><br>"
             "<i>Note: Parameters are automatically applied to the simulation as soon as you finish typing and click away or press Enter.</i>"
         )
         msg.exec_()
