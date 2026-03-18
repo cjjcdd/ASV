@@ -365,10 +365,6 @@ class App(QWidget):
         self.btn_start = QPushButton("START"); self.btn_start.clicked.connect(self.on_start)
         self.btn_stop = QPushButton("STOP"); self.btn_stop.clicked.connect(self.on_stop)
         self.btn_reset = QPushButton("RESET"); self.btn_reset.clicked.connect(self.on_reset)
-        self.btn_start.setFixedHeight(32)
-        self.btn_stop.setFixedHeight(32)
-        self.btn_reset.setFixedHeight(32)
-        self.btn_reset.setFixedWidth(70)
         self.btn_start.setStyleSheet("background-color:#2ecc71"); self.btn_stop.setStyleSheet("background-color:#f39c12")
         self.btn_reset.setStyleSheet("background-color:#e74c3c;color:white")
         hb.addWidget(self.btn_start); hb.addWidget(self.btn_stop); hb.addWidget(self.btn_reset)
@@ -514,25 +510,19 @@ class App(QWidget):
 
         btn_import = QPushButton("Import Validation CSV"); btn_import.clicked.connect(self.import_validation_csv)
         self.lbl_csv_info = QLabel("No file.")
-        self.btn_val_start = QPushButton("▶ Start Validation"); self.btn_val_start.setEnabled(False)
+        self.btn_val_start = QPushButton("Start Validation"); self.btn_val_start.setEnabled(False)
         self.btn_val_start.clicked.connect(self.start_validation)
         self.pb_val = QProgressBar()
+
+        
+        l_load.addWidget(btn_import); l_load.addWidget(self.lbl_csv_info)
+        l_load.addWidget(self.btn_val_start); l_load.addWidget(self.pb_val)
 
         self.btn_results = QPushButton("📊 Results")
         self.btn_results.setEnabled(False)
         self.btn_results.setStyleSheet("background-color:#2980b9;color:white;font-weight:bold;padding:4px;")
         self.btn_results.clicked.connect(self.show_validation_results)
-
-        h_val_btns = QHBoxLayout()
-        self.btn_val_start.setSizePolicy(self.btn_val_start.sizePolicy().Expanding, self.btn_val_start.sizePolicy().Fixed)
-        self.btn_results.setFixedWidth(90)
-        h_val_btns.addWidget(self.btn_val_start)
-        h_val_btns.addWidget(self.btn_results)
-
-        l_load.addWidget(btn_import)
-        l_load.addWidget(self.lbl_csv_info)
-        l_load.addLayout(h_val_btns)
-        l_load.addWidget(self.pb_val)
+        l_load.addWidget(self.btn_results)
         
 
         # --- NEW: SOTA AI SYSTEM IDENTIFICATION SECTION ---
@@ -562,20 +552,19 @@ class App(QWidget):
         # Buttons
         h_sysid_btns = QHBoxLayout()
         self.btn_sysid = QPushButton("▶  Find K & T Parameters")
-        self.btn_sysid = QPushButton("▶  Find K & T")
         self.btn_sysid.setStyleSheet(
             "background-color:#9b59b6;color:white;font-weight:bold;padding:5px;"
         )
         self.btn_sysid.clicked.connect(self.run_system_id)
  
-        self.btn_sysid_cancel = QPushButton("■ Cancel")
+        self.btn_sysid_cancel = QPushButton("■  Cancel")
         self.btn_sysid_cancel.setEnabled(False)
-        self.btn_sysid_cancel.setFixedWidth(75)
         self.btn_sysid_cancel.setStyleSheet("background-color:#e74c3c;color:white;padding:5px;")
         self.btn_sysid_cancel.clicked.connect(self.cancel_system_id)
  
         h_sysid_btns.addWidget(self.btn_sysid)
         h_sysid_btns.addWidget(self.btn_sysid_cancel)
+        v_sysid.addLayout(h_sysid_btns)
  
         self.lbl_sysid_stat = QLabel("Waiting for data…")
         self.pb_sysid = QProgressBar()
@@ -708,7 +697,7 @@ class App(QWidget):
         h_fname = QHBoxLayout()
         h_fname.addWidget(QLabel("File Name:"))
         self.le_exp_fname = QLineEdit()
-        self.le_exp_fname.setPlaceholderText("File name: ")
+        self.le_exp_fname.setPlaceholderText("File Name: ")
         h_fname.addWidget(self.le_exp_fname)
         le.addLayout(h_fname)
 
