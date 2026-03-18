@@ -4,4 +4,4 @@ numpy==1.26.4
 opencv-python
 pandas
 PyMuPDF
-
+scikit-learn
