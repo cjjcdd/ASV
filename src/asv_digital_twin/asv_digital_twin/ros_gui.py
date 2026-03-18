@@ -31,7 +31,6 @@ import json
 from std_msgs.msg import Bool, String, Float32, Float32MultiArray
 
 from scipy.optimize import differential_evolution # SOTA Global Optimizer for System ID
-from sklearn.linear_model import Ridge
 from scipy.optimize import minimize
 
 # --- CONFIG ---
@@ -243,10 +242,13 @@ class SysIDWorker(QThread):
             feat    = np.array(feat)
             F       = np.column_stack([np.ones(len(feat)), feat])
  
-            rk = Ridge(alpha=0.01).fit(F, K_local)
-            rt = Ridge(alpha=0.01).fit(F, T_local)
-            k_init = [float(rk.intercept_)] + [float(c) for c in rk.coef_[1:]]
-            t_init = [float(rt.intercept_)] + [float(c) for c in rt.coef_[1:]]
+            # REPLACE WITH pure NumPy Ridge (alpha=0.01 L2 penalty):
+            lam = 0.01
+            FtF = F.T @ F + lam * np.eye(F.shape[1])
+            k_coeffs_raw = np.linalg.solve(FtF, F.T @ K_local)
+            t_coeffs_raw = np.linalg.solve(FtF, F.T @ T_local)
+            k_init = [float(v) for v in k_coeffs_raw]
+            t_init = [float(v) for v in t_coeffs_raw]
  
             # ── Phase 2: L-BFGS-B gradient polish ─────────────────────
             self.progress.emit("Phase 2/2: Gradient polishing (L-BFGS-B)…")
