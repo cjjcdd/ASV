@@ -5,6 +5,9 @@ import os
 import rclpy
 import numpy as np
 import math
+import matplotlib
+matplotlib.use('Qt5Agg')  # Must be before pyplot import
+import matplotlib.pyplot as plt
 import csv
 import datetime
 import cv2 # [CHANGE] Added for video recording
@@ -31,6 +34,7 @@ import json
 from std_msgs.msg import Bool, String, Float32, Float32MultiArray
 
 from scipy.optimize import differential_evolution # SOTA Global Optimizer for System ID
+#from sklearn.linear_model import Ridge
 from scipy.optimize import minimize
 
 # --- CONFIG ---
@@ -333,6 +337,8 @@ class App(QWidget):
         # Validation vars
         self.val_data = None
         self.val_yaw = 0.0
+        # Add to __init__, near the other val_ vars:
+        self.val_export_path = None
 
 
         self.init_ui()
@@ -507,6 +513,12 @@ class App(QWidget):
         self.btn_val_start = QPushButton("Start Validation"); self.btn_val_start.setEnabled(False)
         self.btn_val_start.clicked.connect(self.start_validation)
         self.pb_val = QProgressBar()
+
+        self.btn_results = QPushButton("📊 Results")
+        self.btn_results.setEnabled(False)
+        self.btn_results.setStyleSheet("background-color:#2980b9;color:white;font-weight:bold;padding:4px;")
+        self.btn_results.clicked.connect(self.show_validation_results)
+        l_load.addWidget(self.btn_results)
         
         l_load.addWidget(btn_import); l_load.addWidget(self.lbl_csv_info)
         l_load.addWidget(self.btn_val_start); l_load.addWidget(self.pb_val)
@@ -1442,27 +1454,104 @@ class App(QWidget):
     
 
     def end_validation(self):
-        self.timer.setInterval(50) 
+        self.timer.setInterval(50)
         self.sim_state = "IDLE"
         self.update_ui()
 
-        # Export
         if self.val_filename:
             base = os.path.splitext(self.val_filename)[0]
             new_name = base + "_ASV_val.csv"
             try:
-                # [FIX] Do NOT filter by input columns. Save exactly what we recorded.
                 df_out = pd.DataFrame(self.val_results)
-                
-                # Optional: Sort columns to put 't' first if it exists
                 if 't' in df_out.columns:
                     cols = ['t'] + [c for c in df_out.columns if c != 't']
                     df_out = df_out[cols]
-                    
                 df_out.to_csv(new_name, index=False)
+                self.val_export_path = new_name   # ADD THIS — store path for Results button
+                self.btn_results.setEnabled(True)  # ADD THIS — unlock Results button
                 QMessageBox.information(self, "Success", f"Validation exported to:\n{new_name}")
             except Exception as e:
                 QMessageBox.warning(self, "Export Error", str(e))
+    
+    def show_validation_results(self):
+        """Load ref CSV and sim CSV then show matplotlib comparison window."""
+        ref_path = getattr(self, 'val_filename', None)
+        sim_path = getattr(self, 'val_export_path', None)
+
+        if not ref_path or not sim_path:
+            QMessageBox.warning(self, "Missing Files",
+                "Run a validation first so both reference and result files are available.")
+            return
+
+        def load_data(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    header = f.readline()
+                    sep = '\t' if '\t' in header else ','
+                df = pd.read_csv(filepath, sep=sep)
+                df.columns = [c.strip() for c in df.columns]
+                return df
+            except Exception as e:
+                QMessageBox.warning(self, "Load Error", f"Could not read:\n{filepath}\n\n{e}")
+                return None
+
+        df_ref = load_data(ref_path)
+        df_sim = load_data(sim_path)
+
+        if df_ref is None or df_sim is None:
+            return
+
+        # Column mapping: sim file uses renamed columns (ref_u, sim_v etc.)
+        # Map sim columns back to common names for plotting
+        col_map = {
+            'ref_u':    'u',
+            'sim_v':    'v',
+            'ref_delta':'delta',
+        }
+        df_sim = df_sim.rename(columns=col_map)
+
+        fig = plt.figure(figsize=(18, 10))
+        fig.suptitle(
+            f'Reference: {os.path.basename(ref_path)}   vs   '
+            f'Simulation: {os.path.basename(sim_path)}',
+            fontsize=13
+        )
+        gs = fig.add_gridspec(3, 4)
+
+        def safe_plot(ax, df, col, style, label):
+            if col in df.columns:
+                ax.plot(df['t'], df[col], style, label=label, linewidth=1.5)
+
+        def make_ax(pos, title, col):
+            ax = fig.add_subplot(pos)
+            safe_plot(ax, df_ref, col, 'k--', 'Ref')
+            safe_plot(ax, df_sim, col, 'r-',  'Sim')
+            ax.set_title(title); ax.grid(True); ax.legend(fontsize=7)
+            return ax
+
+        make_ax(gs[0, 0], "Rudder δ (deg)",       'delta')
+        make_ax(gs[0, 1], "Surge u (m/s)",         'u')
+        make_ax(gs[0, 2], "Sway v (m/s)",          'v')
+        make_ax(gs[0, 3], "Yaw Rate r (deg/s)",    'r')
+        make_ax(gs[1, 0], "Roll φ (deg)",           'phi')
+        make_ax(gs[1, 1], "Pitch θ (deg)",          'theta')
+        make_ax(gs[1, 2], "Heading ψ (deg)",        'psi')
+
+        ax8 = fig.add_subplot(gs[1, 3])
+        safe_plot(ax8, df_ref, 'u_dot', 'k--', 'Ref')
+        safe_plot(ax8, df_sim, 'u_dot', 'r-',  'Sim')
+        ax8.set_title("Accel u̇"); ax8.grid(True); ax8.legend(fontsize=7)
+
+        ax9 = fig.add_subplot(gs[2, :])
+        if 'x' in df_ref.columns and 'y' in df_ref.columns:
+            ax9.plot(df_ref['y'], df_ref['x'], 'k--', label='Reference', linewidth=2)
+        if 'x' in df_sim.columns and 'y' in df_sim.columns:
+            ax9.plot(df_sim['y'], df_sim['x'], 'r-',  label='Simulation', linewidth=2)
+        ax9.set_title("Trajectory"); ax9.set_xlabel("Y (m)"); ax9.set_ylabel("X (m)")
+        ax9.axis('equal'); ax9.grid(True); ax9.legend()
+
+        plt.tight_layout()
+        plt.show()
 
     def loop(self):
         if rclpy.ok():
