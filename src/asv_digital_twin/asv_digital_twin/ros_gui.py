@@ -511,7 +511,7 @@ class App(QWidget):
 
         # --- NEW: SOTA AI SYSTEM IDENTIFICATION SECTION ---
         # --- HYBRID ANALYTIC + GRADIENT SYSTEM IDENTIFICATION ---
-        gb_sysid = QGroupBox("Find Parameters  —  Hybrid SysID  (OLS → L-BFGS-B)")
+        gb_sysid = QGroupBox("Find Parameters")
         v_sysid  = QVBoxLayout()
  
         # Physical parameters row (kept for future extensions / display)
