@@ -31,7 +31,7 @@ TOPIC_INIT_STATE = '/init_state'       # Inject initial conditions for validatio
 DEFAULT_K = 1.343
 DEFAULT_T = 0.327
 DEFAULT_MASS = 100.0  # kg (Arbitrary for inertia, used if we add F=ma later)
-DEFAULT_DT = 0.05      # 20 Hz simulation rate
+DEFAULT_DT = 0.05      # 200 Hz simulation rate
 
 # Rudder Limits
 MAX_RUDDER_DEG = 17.0

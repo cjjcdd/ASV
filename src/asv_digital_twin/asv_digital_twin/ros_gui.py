@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QStackedWidget, QComboBox, QCheckBox, QProgressBar, QMessageBox)
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QImage # [CHANGE] Added for frame capture
+from PyQt5.QtCore import QThread, pyqtSignal
 import pyqtgraph as pg
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
@@ -28,6 +29,10 @@ import pandas as pd
 from std_msgs.msg import Bool, String, Float32
 import json
 from std_msgs.msg import Bool, String, Float32, Float32MultiArray
+
+from scipy.optimize import differential_evolution # SOTA Global Optimizer for System ID
+from sklearn.linear_model import Ridge
+from scipy.optimize import minimize
 
 # --- CONFIG ---
 ODOM_TOPIC = '/odom'
@@ -156,6 +161,134 @@ class GuiNode(Node):
         t.angular.y = float(phi_rad)    # rad
         t.angular.z = float(delta_rad)  # rad
         self.pub_init_state.publish(t)
+
+class SysIDWorker(QThread):
+    """
+    Runs two-phase hybrid system identification in a background thread.
+    Phase 1: Windowed OLS + Ridge Regression  (analytic warm-start, ~1s)
+    Phase 2: L-BFGS-B gradient polishing      (global quality, ~5-25s)
+    Never touches the GUI or ROS — purely NumPy/SciPy.
+    """
+    finished   = pyqtSignal(list, list, float)   # k_coeffs, t_coeffs, mse
+    progress   = pyqtSignal(str)                  # status messages
+    failed     = pyqtSignal(str)                  # error message
+ 
+    def __init__(self, df, parent=None):
+        super().__init__(parent)
+        self.df = df
+ 
+    def run(self):
+        try:
+            df = self.df
+            t_arr     = df['t'].values
+            u_arr     = df['u'].values
+            r_arr     = df['r'].values       # deg/s
+            delta_arr = df['delta'].values   # deg
+            # Prefer pre-computed u_dot if present, otherwise derive it
+            if 'u_dot' in df.columns:
+                udot_arr = df['u_dot'].values
+            else:
+                udot_arr = np.zeros_like(u_arr)
+                udot_arr[1:] = np.diff(u_arr) / np.maximum(np.diff(t_arr), 1e-6)
+ 
+            dt_arr = np.zeros_like(t_arr)
+            dt_arr[1:] = np.diff(t_arr)
+            dt_arr[0]  = dt_arr[1] if len(dt_arr) > 1 else 0.005
+            dt = dt_arr[1:]  # len N-1
+ 
+            r_dot = np.diff(r_arr) / np.maximum(dt, 1e-9)
+            u_m   = u_arr[:-1]
+            r_m   = r_arr[:-1]
+            d_m   = delta_arr[:-1]
+            ud_m  = udot_arr[:-1]
+ 
+            # ── Phase 1: Windowed OLS ──────────────────────────────────
+            self.progress.emit("Phase 1/2: Windowed OLS regression…")
+            WIN = 60
+            STEP = WIN // 3
+            K_local, T_local, feat = [], [], []
+ 
+            for i in range(0, len(r_dot) - WIN, STEP):
+                seg_rd = r_dot[i:i+WIN]
+                seg_r  = r_m[i:i+WIN]
+                seg_d  = d_m[i:i+WIN]
+ 
+                A_seg = np.column_stack([seg_rd, -seg_d])
+                b_seg = -seg_r
+ 
+                try:
+                    cond = np.linalg.cond(A_seg)
+                    if not np.isfinite(cond) or cond > 1e8:
+                        continue
+                    x, _, _, _ = np.linalg.lstsq(A_seg, b_seg, rcond=1e-10)
+                    T_loc, K_loc = x
+                    if 0.001 < T_loc < 20.0 and 0.001 < K_loc < 20.0:
+                        K_local.append(K_loc)
+                        T_local.append(T_loc)
+                        feat.append([
+                            np.mean(np.abs(d_m[i:i+WIN])),
+                            np.mean(np.abs(u_m[i:i+WIN])),
+                            np.mean(np.abs(ud_m[i:i+WIN]))
+                        ])
+                except Exception:
+                    continue
+ 
+            if len(K_local) < 3:
+                self.failed.emit("Not enough valid windows for OLS. "
+                                 "Check that 'delta' and 'r' have sufficient excitation.")
+                return
+ 
+            K_local = np.array(K_local)
+            T_local = np.array(T_local)
+            feat    = np.array(feat)
+            F       = np.column_stack([np.ones(len(feat)), feat])
+ 
+            rk = Ridge(alpha=0.01).fit(F, K_local)
+            rt = Ridge(alpha=0.01).fit(F, T_local)
+            k_init = [float(rk.intercept_)] + [float(c) for c in rk.coef_[1:]]
+            t_init = [float(rt.intercept_)] + [float(c) for c in rt.coef_[1:]]
+ 
+            # ── Phase 2: L-BFGS-B gradient polish ─────────────────────
+            self.progress.emit("Phase 2/2: Gradient polishing (L-BFGS-B)…")
+ 
+            def objective(params):
+                aK, bK, cK, dK, aT, bT, cT, dT = params
+                r_sim = float(r_arr[0])
+                mse   = 0.0
+                for i in range(1, len(t_arr)):
+                    d_i  = delta_arr[i-1]
+                    u_i  = u_arr[i-1]
+                    ud_i = udot_arr[i-1]
+                    dt_i = dt[i-1]
+                    K = aK + bK*abs(d_i) + cK*abs(u_i) + dK*abs(ud_i)
+                    T = aT + bT*abs(d_i) + cT*abs(u_i) + dT*abs(ud_i)
+                    T = max(T, 0.001)
+                    r_sim += (K * d_i - r_sim) / T * dt_i
+                    mse += (r_sim - r_arr[i]) ** 2
+                return mse / len(t_arr)
+ 
+            bounds = [
+                (0.001, 5.0), (0.0, 2.0), (0.0, 2.0), (0.0, 5.0),  # K
+                (0.001, 5.0), (0.0, 2.0), (0.0, 2.0), (0.0, 5.0),  # T
+            ]
+            x0 = k_init + t_init
+            # Clip init to bounds to avoid L-BFGS-B complaints
+            x0 = [np.clip(v, lo, hi) for v, (lo, hi) in zip(x0, bounds)]
+ 
+            result = minimize(
+                objective, x0,
+                method='L-BFGS-B',
+                bounds=bounds,
+                options={'maxiter': 400, 'ftol': 1e-10, 'gtol': 1e-8}
+            )
+ 
+            k_final = [round(v, 4) for v in result.x[:4]]
+            t_final = [round(v, 4) for v in result.x[4:]]
+            self.finished.emit(k_final, t_final, float(result.fun))
+ 
+        except Exception as e:
+            self.failed.emit(str(e))
+
 
 class App(QWidget):
     def __init__(self, node):
@@ -375,6 +508,59 @@ class App(QWidget):
         
         l_load.addWidget(btn_import); l_load.addWidget(self.lbl_csv_info)
         l_load.addWidget(self.btn_val_start); l_load.addWidget(self.pb_val)
+
+        # --- NEW: SOTA AI SYSTEM IDENTIFICATION SECTION ---
+        # --- HYBRID ANALYTIC + GRADIENT SYSTEM IDENTIFICATION ---
+        gb_sysid = QGroupBox("Find Parameters  —  Hybrid SysID  (OLS → L-BFGS-B)")
+        v_sysid  = QVBoxLayout()
+ 
+        # Physical parameters row (kept for future extensions / display)
+        h_phys = QHBoxLayout()
+        self.le_v_len  = QLineEdit("1.0");  self.le_v_len.setPlaceholderText("Len(m)")
+        self.le_v_wid  = QLineEdit("0.5");  self.le_v_wid.setPlaceholderText("Wid(m)")
+        self.le_v_mass = QLineEdit("100.0");self.le_v_mass.setPlaceholderText("Mass(kg)")
+        h_phys.addWidget(QLabel("Length:")); h_phys.addWidget(self.le_v_len)
+        h_phys.addWidget(QLabel("Width:"));  h_phys.addWidget(self.le_v_wid)
+        h_phys.addWidget(QLabel("Mass:"));   h_phys.addWidget(self.le_v_mass)
+        v_sysid.addLayout(h_phys)
+ 
+        # Result display — equation form
+        self.lbl_sysid_eq = QLabel("")
+        self.lbl_sysid_eq.setWordWrap(True)
+        self.lbl_sysid_eq.setStyleSheet(
+            "font-family: monospace; font-size: 11px; "
+            "background: #ecf0f1; padding: 6px; border-radius: 4px;"
+        )
+        v_sysid.addWidget(self.lbl_sysid_eq)
+ 
+        # Buttons
+        h_sysid_btns = QHBoxLayout()
+        self.btn_sysid = QPushButton("▶  Find K & T Parameters")
+        self.btn_sysid.setStyleSheet(
+            "background-color:#9b59b6;color:white;font-weight:bold;padding:5px;"
+        )
+        self.btn_sysid.clicked.connect(self.run_system_id)
+ 
+        self.btn_sysid_cancel = QPushButton("■  Cancel")
+        self.btn_sysid_cancel.setEnabled(False)
+        self.btn_sysid_cancel.setStyleSheet("background-color:#e74c3c;color:white;padding:5px;")
+        self.btn_sysid_cancel.clicked.connect(self.cancel_system_id)
+ 
+        h_sysid_btns.addWidget(self.btn_sysid)
+        h_sysid_btns.addWidget(self.btn_sysid_cancel)
+        v_sysid.addLayout(h_sysid_btns)
+ 
+        self.lbl_sysid_stat = QLabel("Waiting for data…")
+        self.pb_sysid = QProgressBar()
+        self.pb_sysid.setRange(0, 0)   # indeterminate spinner
+        self.pb_sysid.setVisible(False)
+ 
+        v_sysid.addWidget(self.lbl_sysid_stat)
+        v_sysid.addWidget(self.pb_sysid)
+        gb_sysid.setLayout(v_sysid)
+ 
+        l_load.addWidget(gb_sysid)
+        # ------------------------------------------------
         l_load.addStretch()
 
         tab_load.setLayout(l_load)
@@ -487,12 +673,35 @@ class App(QWidget):
         self.btn_cls_tr.clicked.connect(self.clear_traces)
         d_lay.addWidget(self.btn_cls_tr)
 
-        gb_ex = QGroupBox("Recording & Export"); le = QVBoxLayout()
-        le.addWidget(QLabel("File Name:"))
+        #Export Data--------------------------------------------
 
-        self.btn_exp = QPushButton("Export Data"); self.btn_exp.clicked.connect(self.save_data)
-        le.addWidget(self.btn_exp); self.lbl_rec = QLabel("Status: Stopped | Points: 0"); le.addWidget(self.lbl_rec)
+        gb_ex = QGroupBox("Recording & Export"); le = QVBoxLayout()
+        
+        # File Name Row
+        h_fname = QHBoxLayout()
+        h_fname.addWidget(QLabel("File Name:"))
+        self.le_exp_fname = QLineEdit()
+        self.le_exp_fname.setPlaceholderText("Optional custom file name...")
+        h_fname.addWidget(self.le_exp_fname)
+        le.addLayout(h_fname)
+
+        # Buttons Row
+        h_btn_exp = QHBoxLayout()
+        self.btn_exp = QPushButton("Export Data")
+        self.btn_exp.clicked.connect(self.save_data)
+        
+        self.btn_rst_rec = QPushButton("Reset Record")
+        self.btn_rst_rec.clicked.connect(self.reset_record)
+        
+        h_btn_exp.addWidget(self.btn_exp)
+        h_btn_exp.addWidget(self.btn_rst_rec)
+        le.addLayout(h_btn_exp)
+
+        self.lbl_rec = QLabel("Status: Stopped | Points: 0")
+        le.addWidget(self.lbl_rec)
+        
         gb_ex.setLayout(le); d_lay.addWidget(gb_ex)
+        # ------------------------------------
 
         d_lay.addStretch(); scroll.setWidget(dash); l_lay.addWidget(scroll); left.setFixedWidth(400)
 
@@ -677,13 +886,25 @@ class App(QWidget):
         self.lbl_rec.setText("Video Saved.")
     # ----------------------------------------
 
+    def reset_record(self):
+        """Clears the recorded history and resets the label counter."""
+        self.history = []
+        self.lbl_rec.setText("Status: Stopped | Points: 0")
+
     def save_data(self):
         if not self.history: return
         options = QFileDialog.Options()
-        x = datetime.datetime.now()
-        f_name = x.strftime("%c")
-        default_name = f_name
+        
+        # Check if custom file name was provided in the UI
+        custom_name = self.le_exp_fname.text().strip()
+        if custom_name:
+            default_name = custom_name
+        else:
+            x = datetime.datetime.now()
+            default_name = x.strftime("%c").replace(":", "-") # Replaced colons to avoid filesystem errors
+            
         fileName, _ = QFileDialog.getSaveFileName(self, "Export Data", default_name, "CSV Files (*.csv);;Excel Files (*.xlsx)", options=options)
+        
         if fileName:
             try:
                 if not fileName.endswith('.csv') and not fileName.endswith('.xlsx'): fileName += '.csv'
@@ -692,7 +913,9 @@ class App(QWidget):
                     w.writeheader(); w.writerows(self.history)
                 self.lbl_rec.setText(f"Saved: {os.path.basename(fileName)}")
                 self.history = []
-            except Exception as e: self.lbl_rec.setText(f"Error: {str(e)}")
+                self.le_exp_fname.clear() # Optional: clear the text box after saving
+            except Exception as e: 
+                self.lbl_rec.setText(f"Error: {str(e)}")
 
     def send_nomoto(self):
         try:
@@ -992,6 +1215,82 @@ class App(QWidget):
                 self.lbl_csv_info.setText(f"File: {os.path.basename(fname)}\nRows: {len(self.val_data)} | DT: {self.val_dt}s")
                 self.btn_val_start.setEnabled(True)
             except Exception as e: QMessageBox.warning(self, "Error", str(e))
+    
+    def run_system_id(self):
+        if self.val_data is None:
+            QMessageBox.warning(self, "No Data", "Please import a validation CSV first.")
+            return
+ 
+        required = {'r', 'u', 'delta'}
+        missing = required - set(self.val_data.columns)
+        if missing:
+            QMessageBox.warning(self, "Missing Columns",
+                f"CSV must contain columns: {', '.join(required)}\nMissing: {', '.join(missing)}")
+            return
+ 
+        # Disable button, show spinner
+        self.btn_sysid.setEnabled(False)
+        self.btn_sysid_cancel.setEnabled(True)
+        self.pb_sysid.setVisible(True)
+        self.lbl_sysid_stat.setText("Phase 1/2: Windowed OLS regression…")
+        self.lbl_sysid_eq.setText("")
+ 
+        # Spin up background worker
+        self._sysid_worker = SysIDWorker(self.val_data)
+        self._sysid_worker.finished.connect(self._on_sysid_done)
+        self._sysid_worker.progress.connect(self.lbl_sysid_stat.setText)
+        self._sysid_worker.failed.connect(self._on_sysid_failed)
+        self._sysid_worker.start()
+ 
+    def cancel_system_id(self):
+        if hasattr(self, '_sysid_worker') and self._sysid_worker.isRunning():
+            self._sysid_worker.terminate()
+            self._sysid_worker.wait()
+        self.btn_sysid.setEnabled(True)
+        self.btn_sysid_cancel.setEnabled(False)
+        self.pb_sysid.setVisible(False)
+        self.lbl_sysid_stat.setText("Cancelled.")
+ 
+    def _on_sysid_done(self, k_coeffs, t_coeffs, mse):
+        # Re-enable UI
+        self.btn_sysid.setEnabled(True)
+        self.btn_sysid_cancel.setEnabled(False)
+        self.pb_sysid.setVisible(False)
+ 
+        # Populate parameter tab text boxes
+        k_str = ", ".join(f"{v:.4f}" for v in k_coeffs)
+        t_str = ", ".join(f"{v:.4f}" for v in t_coeffs)
+        self.le_K.setText(k_str)
+        self.le_T.setText(t_str)
+ 
+        # Show equation in the Find Parameters panel
+        a, b, c, d = k_coeffs
+        e, f, g, h = t_coeffs
+        eq_text = (
+            f"K = {a:.4f}  +  {b:.4f}·|δ|  +  {c:.4f}·|u|  +  {d:.4f}·|u̇|\n"
+            f"T = {e:.4f}  +  {f:.4f}·|δ|  +  {g:.4f}·|u|  +  {h:.4f}·|u̇|\n\n"
+            f"Trajectory MSE on r:  {mse:.5f}  (deg/s)²"
+        )
+        self.lbl_sysid_eq.setText(eq_text)
+        self.lbl_sysid_stat.setText(f"✔  Done!  MSE = {mse:.5f}")
+ 
+        # Auto-apply to physics engine
+        self.send_nomoto()
+ 
+        QMessageBox.information(
+            self, "System ID Complete",
+            f"Hybrid SysID converged  (MSE = {mse:.5f})\n\n"
+            f"K = {a:.4f} + {b:.4f}·|δ| + {c:.4f}·|u| + {d:.4f}·|u̇|\n"
+            f"T = {e:.4f} + {f:.4f}·|δ| + {g:.4f}·|u| + {h:.4f}·|u̇|\n\n"
+            "Parameters have been applied automatically."
+        )
+ 
+    def _on_sysid_failed(self, msg):
+        self.btn_sysid.setEnabled(True)
+        self.btn_sysid_cancel.setEnabled(False)
+        self.pb_sysid.setVisible(False)
+        self.lbl_sysid_stat.setText(f"✘  Failed: {msg}")
+        QMessageBox.warning(self, "System ID Failed", msg)
 
     def start_validation(self):
         if self.val_data is None: return
