@@ -1467,6 +1467,12 @@ class App(QWidget):
             new_name = base + "_ASV_val.csv"
             try:
                 df_out = pd.DataFrame(self.val_results)
+            
+                # Compute u_dot from simulated u and t
+                if 'u' in df_out.columns and 't' in df_out.columns:
+                    dt_out = df_out['t'].diff().bfill()
+                    df_out['u_dot'] = (df_out['u'].diff().fillna(0) / dt_out.replace(0, np.nan).fillna(1e-6))
+
                 if 't' in df_out.columns:
                     cols = ['t'] + [c for c in df_out.columns if c != 't']
                     df_out = df_out[cols]
@@ -1548,10 +1554,10 @@ class App(QWidget):
 
         ax9 = fig.add_subplot(gs[2, :])
         if 'x' in df_ref.columns and 'y' in df_ref.columns:
-            ax9.plot(df_ref['y'], df_ref['x'], 'k--', label='Reference', linewidth=2)
+            ax9.plot(df_ref['x'], df_ref['y'], 'k--', label='Reference', linewidth=2)
         if 'x' in df_sim.columns and 'y' in df_sim.columns:
-            ax9.plot(df_sim['y'], df_sim['x'], 'r-',  label='Simulation', linewidth=2)
-        ax9.set_title("Trajectory"); ax9.set_xlabel("Y (m)"); ax9.set_ylabel("X (m)")
+            ax9.plot(df_sim['x'], df_sim['y'], 'r-',  label='Simulation', linewidth=2)
+        ax9.set_title("Trajectory"); ax9.set_xlabel("X - North (m)"); ax9.set_ylabel("Y - East (m)")
         ax9.axis('equal'); ax9.grid(True); ax9.legend()
 
         plt.tight_layout()
