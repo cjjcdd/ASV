@@ -1,0 +1,6 @@
+source;share/asv_digital_twin/hook/pythonpath.ps1
+source;share/asv_digital_twin/hook/pythonpath.dsv
+source;share/asv_digital_twin/hook/pythonpath.sh
+source;share/asv_digital_twin/hook/ament_prefix_path.ps1
+source;share/asv_digital_twin/hook/ament_prefix_path.dsv
+source;share/asv_digital_twin/hook/ament_prefix_path.sh

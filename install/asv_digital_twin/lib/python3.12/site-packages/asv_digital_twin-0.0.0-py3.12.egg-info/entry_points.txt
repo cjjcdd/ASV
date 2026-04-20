@@ -1,0 +1,7 @@
+[console_scripts]
+asv_app = asv_digital_twin.main_app:main
+control_node = asv_digital_twin.control_node:main
+dynamics_node = asv_digital_twin.dynamics_node:main
+environment_manager = asv_digital_twin.environment_manager:main
+gui_app = asv_digital_twin.gui_app:main
+ros_gui = asv_digital_twin.ros_gui:main

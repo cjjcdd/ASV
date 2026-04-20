@@ -36,6 +36,14 @@ from std_msgs.msg import Bool, String, Float32, Float32MultiArray
 from scipy.optimize import differential_evolution # SOTA Global Optimizer for System ID
 #from sklearn.linear_model import Ridge
 from scipy.optimize import minimize
+from scipy.signal import savgol_filter
+from scipy.ndimage import uniform_filter1d, binary_dilation
+
+try:
+    from timesfm_sysid_patch import TimeFMSysIDWorker, TimesFMFilterWorker
+except ImportError:
+    pass
+# -------
 
 # --- CONFIG ---
 ODOM_TOPIC = '/odom'
@@ -139,11 +147,11 @@ class GuiNode(Node):
     def send_enable(self, state):
         self.pub_enable.publish(Bool(data=state))
 
-    def send_nomoto_params(self, k_params, t_params, dt):
-        msg = Float32MultiArray()
-        # Pack data as: [Ka, Kb, Kc, Ta, Tb, Tc, dt]
-        msg.data = k_params + t_params + [dt]
-        self.pub_nomoto.publish(msg)
+    def send_nomoto_params(self, k_params, t_params, dt, r_bias=0.0):
+       msg = Float32MultiArray()
+       # Layout: [K0,K1,K2,K3, T0,T1,T2,T3, dt, r_bias]  -> 10 values
+       msg.data = list(k_params) + list(t_params) + [float(dt), float(r_bias)]
+       self.pub_nomoto.publish(msg)
 
     def send_val_cmd(self, u, v, delta, dt):
         # [CHANGE] Publish inputs to Dynamics Node
@@ -167,133 +175,311 @@ class GuiNode(Node):
 
 class SysIDWorker(QThread):
     """
-    Runs two-phase hybrid system identification in a background thread.
-    Phase 1: Windowed OLS + Ridge Regression  (analytic warm-start, ~1s)
-    Phase 2: L-BFGS-B gradient polishing      (global quality, ~5-25s)
-    Never touches the GUI or ROS — purely NumPy/SciPy.
+    Background worker: 5-stage Nomoto system identification.
+ 
+    Signals
+    -------
+    finished(k_list, t_list, r_bias_float, mse_float)
+        Emitted on success.  k_list and t_list are each 4-element Python lists.
+        r_bias_float is the identified persistent yaw-rate offset (deg/s).
+    progress(str)
+        Status messages for the GUI label.
+    failed(str)
+        Error message if the run fails.
     """
-    finished   = pyqtSignal(list, list, float)   # k_coeffs, t_coeffs, mse
-    progress   = pyqtSignal(str)                  # status messages
-    failed     = pyqtSignal(str)                  # error message
+ 
+    # Note: added r_bias float to the finished signal compared to old code
+    finished  = pyqtSignal(list, list, float, float)   # k, t, r_bias, mse
+    progress  = pyqtSignal(str)
+    failed    = pyqtSignal(str)
  
     def __init__(self, df, parent=None):
         super().__init__(parent)
         self.df = df
+        self._cancelled = False
  
+    def cancel(self):
+        self._cancelled = True
+ 
+    # ── helpers ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _simulate_r(params, r_db, delta_rad_arr, d_abs, u_abs, ud_abs,
+                    inf_mask, dt, N):
+        """Run Nomoto exponential integration and return MSE on inf_mask steps."""
+        aK, bK, cK, dK, aT, bT, cT, dT, rb = params
+        # Pre-compute K and T arrays (vectorised)
+        K_arr = aK + bK * d_abs + cK * u_abs + dK * ud_abs
+        T_arr = np.maximum(aT + bT * d_abs + cT * u_abs + dT * ud_abs, 1e-3)
+        e_arr = np.exp(-dt / T_arr)
+ 
+        r_s = float(r_db[0])
+        err = 0.0
+        cnt = 0
+        for i in range(1, N):
+            r_s = r_s * e_arr[i] + (K_arr[i] * delta_rad_arr[i] + rb) * (1.0 - e_arr[i])
+            if inf_mask[i]:
+                d = r_s - r_db[i]
+                err += d * d
+                cnt += 1
+        return err / max(cnt, 1)
+ 
+    # ── main run ──────────────────────────────────────────────────────────────
     def run(self):
         try:
-            df = self.df
-            t_arr     = df['t'].values
-            u_arr     = df['u'].values
-            r_arr     = df['r'].values       # deg/s
-            delta_arr = df['delta'].values   # deg
-            # Prefer pre-computed u_dot if present, otherwise derive it
+            df        = self.df
+            t_arr     = df['t'].values.astype(float)
+            u_arr     = df['u'].values.astype(float)
+            r_arr     = df['r'].values.astype(float)
+            delta_arr = df['delta'].values.astype(float)   # degrees in CSV
+            N         = len(t_arr)
+ 
+            # dt: use median difference (robust to header gaps)
+            dt_vals = np.diff(t_arr)
+            dt      = float(np.median(dt_vals[dt_vals > 0])) if len(dt_vals) > 0 else 0.005
+ 
             if 'u_dot' in df.columns:
-                udot_arr = df['u_dot'].values
+                udot_arr = df['u_dot'].values.astype(float)
             else:
-                udot_arr = np.zeros_like(u_arr)
+                udot_arr = np.zeros(N)
                 udot_arr[1:] = np.diff(u_arr) / np.maximum(np.diff(t_arr), 1e-6)
  
-            dt_arr = np.zeros_like(t_arr)
-            dt_arr[1:] = np.diff(t_arr)
-            dt_arr[0]  = dt_arr[1] if len(dt_arr) > 1 else 0.005
-            dt = dt_arr[1:]  # len N-1
+            # ── STAGE 1: ANOMALY DETECTION ────────────────────────────────
+            self.progress.emit("Stage 1/5: Anomaly detection…")
+            if self._cancelled: return
  
-            r_dot = np.diff(r_arr) / np.maximum(dt, 1e-9)
-            u_m   = u_arr[:-1]
-            r_m   = r_arr[:-1]
-            d_m   = delta_arr[:-1]
-            ud_m  = udot_arr[:-1]
+            win = min(99, (N // 4) * 2 - 1)
+            if win % 2 == 0: win -= 1
+            win = max(win, 5)
+            r_smooth  = r_arr
+            residual  = r_arr - r_smooth
+            mad       = float(np.median(np.abs(residual - np.median(residual))))
+            sigma_hat = mad / 0.6745
+            anomaly   = np.abs(residual) > 6.0 * max(sigma_hat, 0.1)
  
-            # ── Phase 1: Windowed OLS ──────────────────────────────────
-            self.progress.emit("Phase 1/2: Windowed OLS regression…")
-            WIN = 60
-            STEP = WIN // 3
-            K_local, T_local, feat = [], [], []
+            n_anom = int(anomaly.sum())
+            self.progress.emit(f"Stage 1/5: {n_anom} anomalies detected ({100*n_anom/N:.1f}%)")
  
-            for i in range(0, len(r_dot) - WIN, STEP):
-                seg_rd = r_dot[i:i+WIN]
-                seg_r  = r_m[i:i+WIN]
-                seg_d  = d_m[i:i+WIN]
+            # ── STAGE 2: BIAS ESTIMATION ──────────────────────────────────
+            self.progress.emit("Stage 2/5: Estimating yaw-rate bias…")
+            if self._cancelled: return
  
-                A_seg = np.column_stack([seg_rd, -seg_d])
-                b_seg = -seg_r
+            r_dot_est  = np.gradient(r_smooth, dt)
+            bias_mask  = ((np.abs(delta_arr) < 1.0) &
+                          (np.abs(r_dot_est)  < 3.0) &
+                          ~anomaly)
  
+            if bias_mask.sum() >= 20:
+                r_bias = float(np.median(r_arr[bias_mask]))
+            else:
+                # Fallback: use overall median as rough estimate
+                r_bias = float(np.median(r_arr[np.abs(delta_arr) < 2.0]))
+ 
+            r_db = r_arr - r_bias
+            self.progress.emit(
+                f"Stage 2/5: r_bias = {r_bias:.3f} deg/s  "
+                f"(from {int(bias_mask.sum())} quiet samples)"
+            )
+ 
+            # ── STAGE 3: INFORMATIVE SEGMENT FILTER ──────────────────────
+            self.progress.emit("Stage 3/5: Filtering informative segments…")
+            if self._cancelled: return
+ 
+            delta_dot  = np.abs(np.gradient(delta_arr, dt))
+            dd_smooth  = uniform_filter1d(delta_dot, size=20)
+            # Informative = rudder active OR rudder transitioning
+            raw_inf    = (np.abs(delta_arr) > 2.0) | (dd_smooth > 0.2)
+            # Dilate ±10 steps to capture transient response around transitions
+            inf_mask   = binary_dilation(raw_inf, iterations=10) & ~anomaly
+ 
+            n_inf = int(inf_mask.sum())
+            if n_inf < 50:
+                self.failed.emit(
+                    f"Only {n_inf} informative samples found. "
+                    "Check that 'delta' has meaningful excitation (>2°)."
+                )
+                return
+            self.progress.emit(
+                f"Stage 3/5: {n_inf}/{N} informative samples ({100*n_inf/N:.1f}%)"
+            )
+ 
+            # ── STAGE 4: SIGN-AWARE OLS SEED ─────────────────────────────
+            self.progress.emit("Stage 4/5: Windowed OLS seed (sign-aware)…")
+            if self._cancelled: return
+ 
+            r_dot_arr_diff = np.diff(r_db) / np.maximum(np.diff(t_arr), 1e-9)
+            t_inf_idx      = np.where(inf_mask)[0]
+            K_loc, T_loc, feat = [], [], []
+ 
+            WIN  = max(5, min(60, len(t_inf_idx) - 2))
+            STEP = max(1, WIN // 3)
+ 
+            for i in range(0, len(t_inf_idx) - WIN, STEP):
+                seg_idx = t_inf_idx[i: i + WIN]
+                # Require approximate contiguity (no gaps > 5 steps)
+                if len(seg_idx) < 5: continue
+                if (np.diff(seg_idx) > 5).any(): continue
+                s, e = int(seg_idx[0]), int(seg_idx[-1])
+                if e >= N - 1: continue
+ 
+                seg_rd = r_dot_arr_diff[s:e]
+                seg_r  = r_db[s:e]
+                seg_d  = np.radians(delta_arr[s:e])
+ 
+                if np.abs(seg_d).max() < np.radians(2.0): continue
+ 
+                A = np.column_stack([seg_rd, -seg_d])
+                b = -seg_r
                 try:
-                    cond = np.linalg.cond(A_seg)
-                    if not np.isfinite(cond) or cond > 1e8:
-                        continue
-                    x, _, _, _ = np.linalg.lstsq(A_seg, b_seg, rcond=1e-10)
-                    T_loc, K_loc = x
-                    if 0.001 < T_loc < 20.0 and 0.001 < K_loc < 20.0:
-                        K_local.append(K_loc)
-                        T_local.append(T_loc)
+                    cond = np.linalg.cond(A)
+                    if not np.isfinite(cond) or cond > 1e8: continue
+                    x, _, _, _ = np.linalg.lstsq(A, b, rcond=1e-10)
+                    T_l, K_l = x
+                    # Accept any sign of K, reasonable magnitude
+                    if 0.001 < T_l < 20.0 and abs(K_l) < 500.0:
+                        K_loc.append(K_l)
+                        T_loc.append(T_l)
                         feat.append([
-                            np.mean(np.abs(d_m[i:i+WIN])),
-                            np.mean(np.abs(u_m[i:i+WIN])),
-                            np.mean(np.abs(ud_m[i:i+WIN]))
+                            np.mean(np.abs(delta_arr[s:e])),
+                            np.mean(np.abs(u_arr[s:e])),
+                            np.mean(np.abs(udot_arr[s:e]))
                         ])
                 except Exception:
                     continue
  
-            if len(K_local) < 3:
-                self.failed.emit("Not enough valid windows for OLS. "
-                                 "Check that 'delta' and 'r' have sufficient excitation.")
-                return
+            # Determine sign of K from data (sign of correlation delta→r)
+            active = np.abs(delta_arr) > 5.0
+            if active.sum() > 20:
+                corr = float(np.corrcoef(delta_arr[active], r_db[active])[0, 1])
+                k_sign = -1.0 if corr < 0 else 1.0
+            else:
+                k_sign = 1.0
  
-            K_local = np.array(K_local)
-            T_local = np.array(T_local)
-            feat    = np.array(feat)
-            F       = np.column_stack([np.ones(len(feat)), feat])
- 
-            # REPLACE WITH pure NumPy Ridge (alpha=0.01 L2 penalty):
-            lam = 0.01
-            FtF = F.T @ F + lam * np.eye(F.shape[1])
-            k_coeffs_raw = np.linalg.solve(FtF, F.T @ K_local)
-            t_coeffs_raw = np.linalg.solve(FtF, F.T @ T_local)
-            k_init = [float(v) for v in k_coeffs_raw]
-            t_init = [float(v) for v in t_coeffs_raw]
- 
-            # ── Phase 2: L-BFGS-B gradient polish ─────────────────────
-            self.progress.emit("Phase 2/2: Gradient polishing (L-BFGS-B)…")
- 
-            def objective(params):
-                aK, bK, cK, dK, aT, bT, cT, dT = params
-                r_sim = float(r_arr[0])
-                mse   = 0.0
-                for i in range(1, len(t_arr)):
-                    d_i  = delta_arr[i-1]
-                    u_i  = u_arr[i-1]
-                    ud_i = udot_arr[i-1]
-                    dt_i = dt[i-1]
-                    K = aK + bK*abs(d_i) + cK*abs(u_i) + dK*abs(ud_i)
-                    T = aT + bT*abs(d_i) + cT*abs(u_i) + dT*abs(ud_i)
-                    T = max(T, 0.001)
-                    r_sim += (K * d_i - r_sim) / T * dt_i
-                    mse += (r_sim - r_arr[i]) ** 2
-                return mse / len(t_arr)
- 
-            bounds = [
-                (0.001, 5.0), (0.0, 2.0), (0.0, 2.0), (0.0, 5.0),  # K
-                (0.001, 5.0), (0.0, 2.0), (0.0, 2.0), (0.0, 5.0),  # T
-            ]
-            x0 = k_init + t_init
-            # Clip init to bounds to avoid L-BFGS-B complaints
-            x0 = [np.clip(v, lo, hi) for v, (lo, hi) in zip(x0, bounds)]
- 
-            result = minimize(
-                objective, x0,
-                method='L-BFGS-B',
-                bounds=bounds,
-                options={'maxiter': 400, 'ftol': 1e-10, 'gtol': 1e-8}
+            self.progress.emit(
+                f"Stage 4/5: {len(K_loc)} OLS windows, "
+                f"K sign={'−' if k_sign < 0 else '+'} (corr={corr:.3f})"
             )
  
-            k_final = [round(v, 4) for v in result.x[:4]]
-            t_final = [round(v, 4) for v in result.x[4:]]
-            self.finished.emit(k_final, t_final, float(result.fun))
+            # Ridge regression to get affine seed
+            if len(K_loc) >= 2:
+                K_arr_ols = np.array(K_loc)
+                T_arr_ols = np.array(T_loc)
+                F_mat     = np.column_stack([np.ones(len(feat)), np.array(feat)])
+                lam       = 0.1
+                FtF       = F_mat.T @ F_mat + lam * np.eye(4)
+                k_seed    = np.linalg.solve(FtF, F_mat.T @ K_arr_ols)
+                t_seed    = np.linalg.solve(FtF, F_mat.T @ T_arr_ols)
+            else:
+                # No OLS windows — fall back to data-driven rough guess
+                k_seed = np.array([k_sign * 100.0, 0.0, 0.0, 0.0])
+                t_seed = np.array([0.1, 0.001, 0.005, 0.001])
  
-        except Exception as e:
-            self.failed.emit(str(e))
+            # ── STAGE 5: MULTI-START L-BFGS-B ────────────────────────────
+            self.progress.emit("Stage 5/5: Multi-start L-BFGS-B optimisation…")
+            if self._cancelled: return
+ 
+            delta_rad_arr = np.radians(delta_arr)
+            d_abs  = np.abs(delta_arr)
+            u_abs  = np.abs(u_arr)
+            ud_abs = np.abs(udot_arr)
+ 
+            # Bounds — allow both signs for K; T always positive
+            # If k_sign < 0, flip K bounds so search space is correct
+            if k_sign < 0:
+                K_bounds = [(-300.0, 0.0), (-15.0, 0.0), (-15.0, 0.0), (-20.0, 0.0)]
+            else:
+                K_bounds = [(0.0, 300.0), (0.0, 15.0), (0.0, 15.0), (0.0, 20.0)]
+ 
+            T_bounds  = [(0.001, 10.0), (0.0, 2.0), (0.0, 2.0), (0.0, 3.0)]
+            rb_bounds = [(-20.0, 20.0)]
+            bounds    = K_bounds + T_bounds + rb_bounds
+ 
+            def obj(params):
+                return self._simulate_r(
+                    params, r_db, delta_rad_arr, d_abs, u_abs, ud_abs,
+                    inf_mask, dt, N
+                )
+ 
+            # Build a grid of starting points
+            k_a_candidates = [k_seed[0]]
+            for scale in [0.5, 2.0]:
+                k_a_candidates.append(float(np.clip(k_seed[0] * scale,
+                                                     bounds[0][0], bounds[0][1])))
+            if k_sign < 0:
+                k_a_candidates += [-50.0, -100.0, -150.0, -200.0]
+            else:
+                k_a_candidates += [50.0, 100.0, 150.0, 200.0]
+ 
+            T_a_candidates = [max(t_seed[0], 0.001), 0.01, 0.05, 0.1, 0.3, 0.5]
+ 
+            starts = []
+            for ka in k_a_candidates:
+                for ta in T_a_candidates:
+                    x0 = [
+                        float(np.clip(ka,           bounds[0][0], bounds[0][1])),
+                        float(np.clip(k_seed[1],    bounds[1][0], bounds[1][1])),
+                        float(np.clip(k_seed[2],    bounds[2][0], bounds[2][1])),
+                        float(np.clip(k_seed[3],    bounds[3][0], bounds[3][1])),
+                        float(np.clip(ta,           bounds[4][0], bounds[4][1])),
+                        float(np.clip(t_seed[1],    bounds[5][0], bounds[5][1])),
+                        float(np.clip(t_seed[2],    bounds[6][0], bounds[6][1])),
+                        float(np.clip(t_seed[3],    bounds[7][0], bounds[7][1])),
+                        0.0
+                    ]
+                    try:
+                        mse0 = obj(x0)
+                        if np.isfinite(mse0):
+                            starts.append((mse0, x0))
+                    except Exception:
+                        pass
+ 
+            if not starts:
+                self.failed.emit("All starting points failed. Check input data.")
+                return
+ 
+            # Sort and take top-5 starting points for polishing
+            starts.sort(key=lambda s: s[0])
+            top_starts = starts[:5]
+            self.progress.emit(
+                f"Stage 5/5: Polishing {len(top_starts)} starts "
+                f"(best seed MSE={top_starts[0][0]:.2f})…"
+            )
+ 
+            best_res = None
+            for rank, (seed_mse, x0) in enumerate(top_starts):
+                if self._cancelled: return
+                try:
+                    res = minimize(
+                        obj, x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 500, 'ftol': 1e-13, 'gtol': 1e-10}
+                    )
+                    if best_res is None or res.fun < best_res.fun:
+                        best_res = res
+                    self.progress.emit(
+                        f"Stage 5/5: Start {rank+1}/{len(top_starts)} "
+                        f"MSE={res.fun:.4f}  best={best_res.fun:.4f}"
+                    )
+                except Exception as ex:
+                    self.progress.emit(f"Start {rank+1} failed: {ex}")
+ 
+            if best_res is None:
+                self.failed.emit("All optimisation starts failed.")
+                return
+ 
+            # ── RESULTS ───────────────────────────────────────────────────
+            k_final    = [round(float(v), 4) for v in best_res.x[:4]]
+            t_final    = [round(float(v), 4) for v in best_res.x[4:8]]
+            rb_corr    = float(best_res.x[8])
+            r_bias_out = round(r_bias + rb_corr, 4)
+            mse_out    = float(best_res.fun)
+ 
+            self.finished.emit(k_final, t_final, r_bias_out, mse_out)
+ 
+        except Exception as ex:
+            import traceback
+            self.failed.emit(f"{ex}\n{traceback.format_exc()}")
+ 
 
 
 class App(QWidget):
@@ -469,6 +655,9 @@ class App(QWidget):
         fn.addRow("K parameter (a, b, c, d):", self.le_K)
         fn.addRow("T parameter (a, b, c, d):", self.le_T)
         fn.addRow("Dt (Sim Step):", self.le_dt)
+        self.le_rbias = QLineEdit("0.0000")
+        fn.addRow("r_bias (deg/s, drift at δ=0):", self.le_rbias)
+        self.le_rbias.editingFinished.connect(self.send_nomoto)
         lay_gb.addLayout(fn)
 
         # Auto-update signals (triggers when you hit Enter or click outside the box)
@@ -936,20 +1125,22 @@ class App(QWidget):
                 self.lbl_rec.setText(f"Error: {str(e)}")
 
     def send_nomoto(self):
-        try:
-            # Parse the comma-separated strings into lists of floats
-            k_params = [float(x.strip()) for x in self.le_K.text().split(',')]
-            t_params = [float(x.strip()) for x in self.le_T.text().split(',')]
-            dt = float(self.le_dt.text())
+       try:
+           k_params = [float(x.strip()) for x in self.le_K.text().split(',')]
+           t_params = [float(x.strip()) for x in self.le_T.text().split(',')]
+           dt       = float(self.le_dt.text())
+           r_bias   = float(self.le_rbias.text())
 
-            if len(k_params) != 4 or len(t_params) != 4:
-                self.lbl_rec.setText("Error: K and T must have exactly 4 values.")
-                return
+           if len(k_params) != 4 or len(t_params) != 4:
+               self.lbl_rec.setText("Error: K and T must have exactly 4 values.")
+               return
 
-            self.node.send_nomoto_params(k_params, t_params, dt)
-            self.lbl_rec.setText(f"Auto-Applied Params: K={k_params}, T={t_params}, dt={dt}")
-        except Exception as e:
-            self.lbl_rec.setText(f"Param Format Error: {e}")
+           self.node.send_nomoto_params(k_params, t_params, dt, r_bias)
+           self.lbl_rec.setText(
+               f"Applied: K={k_params}, T={t_params}, dt={dt}, r_bias={r_bias:.4f}"
+           )
+       except Exception as e:
+           self.lbl_rec.setText(f"Param Format Error: {e}")
 
     def show_data_help(self):
         msg = QMessageBox(self)
@@ -1254,10 +1445,10 @@ class App(QWidget):
         self.lbl_sysid_eq.setText("")
  
         # Spin up background worker
-        self._sysid_worker = SysIDWorker(self.val_data)
+        self._sysid_worker = TimeFMSysIDWorker(self.val_data)
+        
         self._sysid_worker.finished.connect(self._on_sysid_done)
         self._sysid_worker.progress.connect(self.lbl_sysid_stat.setText)
-        self._sysid_worker.failed.connect(self._on_sysid_failed)
         self._sysid_worker.start()
  
     def cancel_system_id(self):
@@ -1269,39 +1460,39 @@ class App(QWidget):
         self.pb_sysid.setVisible(False)
         self.lbl_sysid_stat.setText("Cancelled.")
  
-    def _on_sysid_done(self, k_coeffs, t_coeffs, mse):
-        # Re-enable UI
-        self.btn_sysid.setEnabled(True)
-        self.btn_sysid_cancel.setEnabled(False)
-        self.pb_sysid.setVisible(False)
- 
-        # Populate parameter tab text boxes
-        k_str = ", ".join(f"{v:.4f}" for v in k_coeffs)
-        t_str = ", ".join(f"{v:.4f}" for v in t_coeffs)
-        self.le_K.setText(k_str)
-        self.le_T.setText(t_str)
- 
-        # Show equation in the Find Parameters panel
-        a, b, c, d = k_coeffs
-        e, f, g, h = t_coeffs
-        eq_text = (
-            f"K = {a:.4f}  +  {b:.4f}·|δ|  +  {c:.4f}·|u|  +  {d:.4f}·|u̇|\n"
-            f"T = {e:.4f}  +  {f:.4f}·|δ|  +  {g:.4f}·|u|  +  {h:.4f}·|u̇|\n\n"
-            f"Trajectory MSE on r:  {mse:.5f}  (deg/s)²"
-        )
-        self.lbl_sysid_eq.setText(eq_text)
-        self.lbl_sysid_stat.setText(f"✔  Done!  MSE = {mse:.5f}")
- 
-        # Auto-apply to physics engine
-        self.send_nomoto()
- 
-        QMessageBox.information(
-            self, "System ID Complete",
-            f"Hybrid SysID converged  (MSE = {mse:.5f})\n\n"
-            f"K = {a:.4f} + {b:.4f}·|δ| + {c:.4f}·|u| + {d:.4f}·|u̇|\n"
-            f"T = {e:.4f} + {f:.4f}·|δ| + {g:.4f}·|u| + {h:.4f}·|u̇|\n\n"
-            "Parameters have been applied automatically."
-        )
+    def _on_sysid_done(self, k_coeffs, t_coeffs, r_bias, mse):
+       self.btn_sysid.setEnabled(True)
+       self.btn_sysid_cancel.setEnabled(False)
+       self.pb_sysid.setVisible(False)
+
+       k_str = ", ".join(f"{v:.4f}" for v in k_coeffs)
+       t_str = ", ".join(f"{v:.4f}" for v in t_coeffs)
+       self.le_K.setText(k_str)
+       self.le_T.setText(t_str)
+
+       # Show r_bias in the new field (add self.le_rbias QLineEdit to the param tab)
+       self.le_rbias.setText(f"{r_bias:.4f}")
+
+       a, b, c, d = k_coeffs
+       e, f, g, h = t_coeffs
+       eq_text = (
+           f"K = {a:.4f}  +  {b:.4f}·|δ|  +  {c:.4f}·|u|  +  {d:.4f}·|u̇|\n"
+           f"T = {e:.4f}  +  {f:.4f}·|δ|  +  {g:.4f}·|u|  +  {h:.4f}·|u̇|\n"
+           f"r_bias = {r_bias:.4f} deg/s   (persistent drift at δ=0)\n\n"
+           f"Trajectory MSE on r:  {mse:.4f}  (deg/s)²"
+       )
+       self.lbl_sysid_eq.setText(eq_text)
+       self.lbl_sysid_stat.setText(f"✔  Done!  MSE = {mse:.4f}")
+       self.send_nomoto()   # auto-apply including r_bias
+
+       QMessageBox.information(
+           self, "System ID Complete",
+           f"Identified parameters (MSE = {mse:.4f})\n\n"
+           f"K = {a:.4f} + {b:.4f}·|δ| + {c:.4f}·|u| + {d:.4f}·|u̇|\n"
+           f"T = {e:.4f} + {f:.4f}·|δ| + {g:.4f}·|u| + {h:.4f}·|u̇|\n"
+           f"r_bias = {r_bias:.4f} deg/s\n\n"
+           "All parameters applied automatically."
+       )
  
     def _on_sysid_failed(self, msg):
         self.btn_sysid.setEnabled(True)
@@ -1511,15 +1702,6 @@ class App(QWidget):
         if df_ref is None or df_sim is None:
             return
 
-        # Column mapping: sim file uses renamed columns (ref_u, sim_v etc.)
-        # Map sim columns back to common names for plotting
-        col_map = {
-            'ref_u':    'u',
-            'sim_v':    'v',
-            'ref_delta':'delta',
-        }
-        df_sim = df_sim.rename(columns=col_map)
-
         fig = plt.figure(figsize=(18, 10))
         fig.suptitle(
             f'Reference: {os.path.basename(ref_path)}   vs   '
@@ -1528,28 +1710,27 @@ class App(QWidget):
         )
         gs = fig.add_gridspec(3, 4)
 
-        def safe_plot(ax, df, col, style, label):
-            if col in df.columns:
-                ax.plot(df['t'], df[col], style, label=label, linewidth=1.5)
-
-        def make_ax(pos, title, col):
+        # FIX: explicitly pull the correct columns without renaming the entire dataframe
+        def make_ax(pos, title, col_ref, col_sim):
             ax = fig.add_subplot(pos)
-            safe_plot(ax, df_ref, col, 'k--', 'Ref')
-            safe_plot(ax, df_sim, col, 'r-',  'Sim')
+            if col_ref in df_ref.columns:
+                ax.plot(df_ref['t'], df_ref[col_ref], 'k--', label='Ref', linewidth=1.5)
+            if col_sim in df_sim.columns:
+                ax.plot(df_sim['t'], df_sim[col_sim], 'r-',  label='Sim', linewidth=1.5)
             ax.set_title(title); ax.grid(True); ax.legend(fontsize=7)
             return ax
 
-        make_ax(gs[0, 0], "Rudder δ (deg)",       'delta')
-        make_ax(gs[0, 1], "Surge u (m/s)",         'u')
-        make_ax(gs[0, 2], "Sway v (m/s)",          'v')
-        make_ax(gs[0, 3], "Yaw Rate r (deg/s)",    'r')
-        make_ax(gs[1, 0], "Roll φ (deg)",           'phi')
-        make_ax(gs[1, 1], "Pitch θ (deg)",          'theta')
-        make_ax(gs[1, 2], "Heading ψ (deg)",        'psi')
+        make_ax(gs[0, 0], "Rudder δ (deg)",       'delta', 'delta')
+        make_ax(gs[0, 1], "Surge u (m/s)",        'u', 'u')
+        make_ax(gs[0, 2], "Sway v (m/s)",         'v', 'sim_v')
+        make_ax(gs[0, 3], "Yaw Rate r (deg/s)",   'r', 'r')
+        make_ax(gs[1, 0], "Roll φ (deg)",         'phi', 'phi')
+        make_ax(gs[1, 1], "Pitch θ (deg)",        'theta', 'theta')
+        make_ax(gs[1, 2], "Heading ψ (deg)",      'psi', 'psi')
 
         ax8 = fig.add_subplot(gs[1, 3])
-        safe_plot(ax8, df_ref, 'u_dot', 'k--', 'Ref')
-        safe_plot(ax8, df_sim, 'u_dot', 'r-',  'Sim')
+        if 'u_dot' in df_ref.columns: ax8.plot(df_ref['t'], df_ref['u_dot'], 'k--', label='Ref')
+        if 'u_dot' in df_sim.columns: ax8.plot(df_sim['t'], df_sim['u_dot'], 'r-',  label='Sim')
         ax8.set_title("Accel u̇"); ax8.grid(True); ax8.legend(fontsize=7)
 
         ax9 = fig.add_subplot(gs[2, :])

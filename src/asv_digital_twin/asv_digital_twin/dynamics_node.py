@@ -31,7 +31,7 @@ TOPIC_INIT_STATE = '/init_state'       # Inject initial conditions for validatio
 DEFAULT_K = 1.343
 DEFAULT_T = 0.327
 DEFAULT_MASS = 100.0  # kg (Arbitrary for inertia, used if we add F=ma later)
-DEFAULT_DT = 0.05      # 200 Hz simulation rate
+DEFAULT_DT = 0.005      # 200 Hz simulation rate
 
 # Rudder Limits
 MAX_RUDDER_DEG = 17.0
@@ -53,6 +53,8 @@ class DynamicsNode(Node):
             'delta': 0.0, # Actual rudder angle (rad)
             'phi': 0.0, 'theta': 0.0
         }
+
+        self.r_bias_rads = 0.0
 
         # --- Empirical Environment & Filter Variables ---
         # Hidden Earth-frame currents to match the MATLAB reference drift
@@ -141,14 +143,18 @@ class DynamicsNode(Node):
         self.publish_state()
 
     def cb_params(self, msg):
-        if len(msg.data) >= 9:
-            self.K_params = msg.data[0:4]
-            self.T_params = msg.data[4:8]
-            self.sim_dt = msg.data[8]
-            
-            self.timer.cancel()
-            self.timer = self.create_timer(self.sim_dt, self.update)
-            self.get_logger().info(f"Params updated: K={self.K_params}, T={self.T_params}, dt={self.sim_dt}")
+       if len(msg.data) >= 9:
+           self.K_params  = list(msg.data[0:4])
+           self.T_params  = list(msg.data[4:8])
+           self.sim_dt    = float(msg.data[8])
+           self.r_bias_rads = math.radians(float(msg.data[9])) if len(msg.data) >= 10 else 0.0
+
+           self.timer.cancel()
+           self.timer = self.create_timer(self.sim_dt, self.update)
+           self.get_logger().info(
+               f"Params updated: K={self.K_params}, T={self.T_params}, "
+               f"dt={self.sim_dt}, r_bias={math.degrees(self.r_bias_rads):.3f} deg/s"
+           )
 
     def cb_cmd_vel(self, msg):
         # Manual Mode
@@ -221,48 +227,45 @@ class DynamicsNode(Node):
                                 math.radians(MAX_RUDDER_DEG))
 
     # --- PHYSICS (NOMOTO NED) ---
+    # --- PHYSICS (NOMOTO NED) ---
     def step_physics(self, u_cmd, v_cmd, delta_cmd, dt):
-        
-        # 1. Save old u to calculate true udot later
         old_u = self.state['u']
 
         if self.validation_mode:
-            # 1a. VALIDATION MODE: Instantaneous State Injection (No Lag)
             self.state['u'] = u_cmd
             self.state['v'] = v_cmd
             self.state['delta'] = delta_cmd
             
-            # Calculate true udot AFTER state update
             current_u_dot = (self.state['u'] - old_u) / dt if dt > 0 else 0.0
             
-            # 2. Nomoto Dynamics
             delta_deg = math.degrees(self.state['delta'])
             u_val = self.state['u'] 
             
-            # NEW 4-PARAMETER FORMULA: a + b*abs(del) + c*abs(u) + d*abs(udot)
             K = (self.K_params[0] + self.K_params[1] * abs(delta_deg) + 
                  self.K_params[2] * abs(u_val) + self.K_params[3] * abs(current_u_dot))
             T = (self.T_params[0] + self.T_params[1] * abs(delta_deg) + 
                  self.T_params[2] * abs(u_val) + self.T_params[3] * abs(current_u_dot))
             if T < 0.001: T = 0.001
 
-            r = self.state['r'] 
             delta_curr = self.state['delta'] 
-            r_dot = (K * delta_curr - r) / T
             
-            # 3. BACKWARD INTEGRATION SEQUENCE
-            self.state['r'] += r_dot * dt
+            # --- FIX: K * delta_curr yields degrees/sec. Convert to rad/sec! ---
+            target_r_rads = math.radians(K * delta_curr)
+            
+            # STABLE EXPONENTIAL INTEGRATION
+            exp_term = math.exp(-dt / T)
+            self.state['r'] = (self.state['r'] * exp_term
+                   + (target_r_rads + self.r_bias_rads) * (1.0 - exp_term))
+            
             self.state['psi'] += self.state['r'] * dt
             
-            # 4. REPRODUCING THE REFERENCE TYPOS
             psi = self.state['psi']
-            x_vel = u_val * math.cos(psi) + self.state['v'] * math.sin(psi)
-            y_vel = u_val * math.sin(psi) - self.state['v'] * math.sin(psi)
+            x_vel = u_val * math.cos(psi) - self.state['v'] * math.sin(psi)
+            y_vel = u_val * math.sin(psi) + self.state['v'] * math.cos(psi)
             
             self.state['x'] += x_vel * dt
             self.state['y'] += y_vel * dt
             
-            # 5. Roll and Pitch
             r_deg = math.degrees(self.state['r'])
             phi_deg = 0.000012 * (r_deg**3) - 0.497002 * r_deg
             theta_deg = 0.5657*(u_val**2) - 4.0252*u_val + 0.0416*abs(phi_deg) - 2.7247*(current_u_dot)
@@ -271,8 +274,6 @@ class DynamicsNode(Node):
             self.state['theta'] = math.radians(theta_deg)
             
         else:
-            # 1b. NORMAL MODE: Correct Real-World Physics
-            # Actuator lag
             diff = delta_cmd - self.state['delta']
             step = math.radians(RUDDER_SPEED_DEG_S) * dt
             if abs(diff) < step:
@@ -280,7 +281,6 @@ class DynamicsNode(Node):
             else:
                 self.state['delta'] += math.copysign(step, diff)
                 
-            # Speed drag and lag
             drag = 0.05 * (self.state['r'] ** 2)
             kinematic_u_dot = (u_cmd - self.state['u']) * 0.5 - drag
             self.state['u'] += kinematic_u_dot * dt
@@ -289,25 +289,19 @@ class DynamicsNode(Node):
             v_dot = (v_cmd - self.state['v']) * 0.5 + v_induced
             self.state['v'] += v_dot * dt
 
-            # Calculate true udot AFTER state update
             current_u_dot = (self.state['u'] - old_u) / dt if dt > 0 else 0.0
 
-            # 2. Nomoto Dynamics
             delta_deg = math.degrees(self.state['delta'])
             u_val = self.state['u'] 
             
-            # NEW 4-PARAMETER FORMULA: a + b*abs(del) + c*abs(u) + d*abs(udot)
             K = (self.K_params[0] + self.K_params[1] * abs(delta_deg) + 
                  self.K_params[2] * abs(u_val) + self.K_params[3] * abs(current_u_dot))
             T = (self.T_params[0] + self.T_params[1] * abs(delta_deg) + 
                  self.T_params[2] * abs(u_val) + self.T_params[3] * abs(current_u_dot))
             if T < 0.001: T = 0.001
 
-            r = self.state['r'] 
             delta_curr = self.state['delta'] 
-            r_dot = (K * delta_curr - r) / T
 
-            # 3. NORMAL KINEMATICS (Standard Forward Euler)
             psi = self.state['psi']
             x_vel = self.state['u'] * math.cos(psi) - self.state['v'] * math.sin(psi)
             y_vel = self.state['u'] * math.sin(psi) + self.state['v'] * math.cos(psi)
@@ -315,10 +309,17 @@ class DynamicsNode(Node):
             self.state['x'] += x_vel * dt
             self.state['y'] += y_vel * dt
 
-            self.state['r'] += r_dot * dt
-            self.state['psi'] += self.state['r'] * dt
+            # --- FIX: Convert to rad/sec! ---
+            target_r_rads = math.radians(K * delta_curr)
 
-            # 4. Roll and Pitch
+            # STABLE EXPONENTIAL INTEGRATION
+            exp_term = math.exp(-dt / T)
+            self.state['r'] = (self.state['r'] * exp_term
+                   + (target_r_rads + self.r_bias_rads) * (1.0 - exp_term))
+            
+            self.state['psi'] += self.state['r'] * dt
+            # (Removed the duplicate integration line that was here)
+
             r_deg = math.degrees(self.state['r'])
             phi_deg = 0.000012 * (r_deg**3) - 0.497002 * r_deg
             theta_deg = 0.5657*(u_val**2) - 4.0252*u_val + 0.0416*abs(phi_deg) - 2.7247*(current_u_dot)

@@ -1,0 +1,97 @@
+running egg_info
+creating ../../build/asv_digital_twin/asv_digital_twin.egg-info
+writing ../../build/asv_digital_twin/asv_digital_twin.egg-info/PKG-INFO
+writing dependency_links to ../../build/asv_digital_twin/asv_digital_twin.egg-info/dependency_links.txt
+writing entry points to ../../build/asv_digital_twin/asv_digital_twin.egg-info/entry_points.txt
+writing requirements to ../../build/asv_digital_twin/asv_digital_twin.egg-info/requires.txt
+writing top-level names to ../../build/asv_digital_twin/asv_digital_twin.egg-info/top_level.txt
+writing manifest file '../../build/asv_digital_twin/asv_digital_twin.egg-info/SOURCES.txt'
+reading manifest file '../../build/asv_digital_twin/asv_digital_twin.egg-info/SOURCES.txt'
+writing manifest file '../../build/asv_digital_twin/asv_digital_twin.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build
+creating /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib
+creating /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/control_node.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/environment_manager.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/guide_screen.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/main_app.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/gui_app.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/__init__.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/dynamics_node.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/ros_gui.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/doc_screen.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+copying asv_digital_twin/start_screen.py -> /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin
+running install
+running install_lib
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/control_node.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/environment_manager.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/guide_screen.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/main_app.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/gui_app.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/__init__.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/dynamics_node.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/ros_gui.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/doc_screen.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+copying /home/jj/Desktop/Github/ASV/build/asv_digital_twin/build/lib/asv_digital_twin/start_screen.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/control_node.py to control_node.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/environment_manager.py to environment_manager.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/guide_screen.py to guide_screen.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/main_app.py to main_app.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/gui_app.py to gui_app.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/__init__.py to __init__.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/dynamics_node.py to dynamics_node.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/ros_gui.py to ros_gui.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/doc_screen.py to doc_screen.cpython-312.pyc
+byte-compiling /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin/start_screen.py to start_screen.cpython-312.pyc
+running install_data
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/ament_index
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/ament_index/resource_index
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/ament_index/resource_index/packages
+copying resource/asv_digital_twin -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/ament_index/resource_index/packages
+copying package.xml -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/launch
+copying launch/master.launch.py -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/launch
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/config
+copying config/bridge_config.yaml -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/config
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/worlds
+copying worlds/ocean_world.sdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/worlds
+copying worlds/sydney_regatta.sdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/worlds
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel
+copying models/asv_vessel/model.sdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel
+copying models/asv_vessel/vessel.png -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/meshes
+copying models/asv_vessel/meshes/hull.stl -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/meshes
+copying models/asv_vessel/meshes/engine.dae -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/meshes
+copying models/asv_vessel/meshes/propeller.dae -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/meshes
+copying models/asv_vessel/meshes/WamV.png -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/meshes
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/WAM-V-Base
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/WAM-V-Base/mesh
+copying models/asv_vessel/WAM-V-Base/mesh/WamV.png -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/asv_vessel/WAM-V-Base/mesh
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves
+copying models/coast_waves/model.sdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves
+copying models/coast_waves/model.config -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/meshes
+copying models/coast_waves/meshes/yuksekogretim-kurulu-transkript-belgesi-sorgulama.pdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/meshes
+copying models/coast_waves/meshes/waterlow.dae -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/meshes
+copying models/coast_waves/meshes/Program-Kontrol_ve_Otomasyon_Mhendislii_Lisans_Program_30_ngilizce.pdf -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/meshes
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/programs
+copying models/coast_waves/materials/programs/GerstnerWaves_fs_330.glsl -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/programs
+copying models/coast_waves/materials/programs/GerstnerWaves_vs_330.glsl -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/programs
+creating /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/textures
+copying models/coast_waves/materials/textures/skybox_lowres.dds -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/textures
+copying models/coast_waves/materials/textures/wave_normals.dds -> /home/jj/Desktop/Github/ASV/install/asv_digital_twin/share/asv_digital_twin/models/coast_waves/materials/textures
+running install_egg_info
+Copying ../../build/asv_digital_twin/asv_digital_twin.egg-info to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/python3.12/site-packages/asv_digital_twin-0.0.0-py3.12.egg-info
+running install_scripts
+Installing asv_app script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+Installing control_node script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+Installing dynamics_node script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+Installing environment_manager script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+Installing gui_app script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+Installing ros_gui script to /home/jj/Desktop/Github/ASV/install/asv_digital_twin/lib/asv_digital_twin
+writing list of installed files to '/home/jj/Desktop/Github/ASV/build/asv_digital_twin/install.log'
